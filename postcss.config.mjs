@@ -4,4 +4,6 @@ const config = {
   },
 };
 
-export default config;
+export default config; - nice of you
+
+good to go
