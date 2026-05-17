@@ -29,16 +29,50 @@ export type YoutubeSearchItem = {
   url: string;
 };
 
+/**
+ * Strip parts of a query that commonly cause YouTube to redirect/captcha:
+ * - parentheticals like (From "Movie Name")
+ * - trailing qualifiers like "official audio", "official video", "lyrics"
+ */
+function simplifyQuery(query: string): string {
+  return query
+    .replace(/\s*\(from\s+"[^"]*"\)/gi, "")
+    .replace(/\s*\(from\s+'[^']*'\)/gi, "")
+    .replace(/\s+official\s+(audio|video|lyric(s)?|music\s+video)/gi, "")
+    .replace(/\s+lyrics?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+async function runSearch(query: string): Promise<YtVideo[]> {
+  const result = (await ytSearch(query)) as YtSearchResult;
+  return result.videos ?? [];
+}
+
 export async function searchYoutubeVideos(query: string, limit = 10) {
-  const searchResult = (await ytSearch(query)) as YtSearchResult;
-  const videos = searchResult.videos ?? [];
+  let videos: YtVideo[] = [];
+
+  try {
+    videos = await runSearch(query);
+  } catch {
+    // On 302 / redirect / bot-check, retry with a stripped-down query
+    const stripped = simplifyQuery(query);
+    if (stripped && stripped !== query) {
+      try {
+        videos = await runSearch(stripped);
+      } catch {
+        return [];
+      }
+    } else {
+      return [];
+    }
+  }
 
   return videos
     .filter((video) => video.videoId)
     .slice(0, limit)
     .map((video) => {
       const videoId = video.videoId as string;
-
       return {
         videoId,
         title: video.title ?? "Unknown title",

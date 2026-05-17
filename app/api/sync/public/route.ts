@@ -6,19 +6,18 @@ export async function POST(request: NextRequest) {
   const playlistInput = String(form.get("playlist") ?? "").trim();
 
   if (!playlistInput) {
-    return NextResponse.redirect(
-      new URL("/?error=missing-spotify-playlist", request.url),
+    return NextResponse.json(
+      { error: "Missing playlist URL or ID." },
+      { status: 400 }
     );
   }
 
   try {
-    const stored = await syncSpotifyPublicPlaylist(playlistInput);
-    return NextResponse.redirect(new URL(`/playlist/${stored.slug}`, request.url));
+    const result = await syncSpotifyPublicPlaylist(playlistInput);
+    return NextResponse.json({ slug: result.slug });
   } catch (error) {
     console.error("[sync/public] Error:", error);
-    const errorMsg = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.redirect(
-      new URL(`/?error=spotify-public-sync-failed&details=${encodeURIComponent(errorMsg)}`, request.url),
-    );
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
