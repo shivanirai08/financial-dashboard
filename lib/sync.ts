@@ -1,57 +1,12 @@
-import type { PlaylistTrack, SpotifyToken } from "@/lib/types";
+import type { PlaylistTrack } from "@/lib/types";
 import {
   extractSpotifyPlaylistId,
-  fetchSpotifyAppAccessToken,
   fetchSpotifyPlaylistDetails,
-  fetchSpotifyPlaylists,
-  fetchSpotifyPlaylistTracks,
-  refreshSpotifyToken,
+  getPlaylistTracks,
 } from "@/lib/spotify";
 import { storePlaylist } from "@/lib/storage";
 import { searchYoutubeVideo, getYoutubeSearchResults } from "@/lib/youtube";
-
-function parseSpotifyToken(rawToken: string) {
-  return JSON.parse(rawToken) as SpotifyToken;
-}
-
-export async function syncSpotifyLibrary(rawToken: string) {
-  let token = parseSpotifyToken(rawToken);
-
-  if (token.refresh_token) {
-    token = await refreshSpotifyToken(token.refresh_token);
-  }
-
-  const playlists = await fetchSpotifyPlaylists(token.access_token);
-
-  for (const playlist of playlists) {
-    const tracks = await fetchSpotifyPlaylistTracks(token.access_token, playlist.id);
-    const items: PlaylistTrack[] = [];
-
-    for (const track of tracks) {
-      const query = `${track.title} ${track.artist} official audio`;
-      const result = await searchYoutubeVideo(query);
-      const allResults = await getYoutubeSearchResults(query, 5);
-
-      items.push({
-        ...track,
-        youtubeVideoId: result?.videoId ?? null,
-        youtubeUrl: result?.url ?? null,
-        youtubeResults: allResults,
-        matchStatus: result ? "matched" : "unmatched",
-      });
-    }
-
-    await storePlaylist({
-      id: playlist.id,
-      name: playlist.name,
-      source: "spotify",
-      syncedAt: new Date().toISOString(),
-      items,
-    });
-  }
-
-  return token;
-}
+import crypto from "node:crypto";
 
 export async function syncSpotifyPublicPlaylist(playlistInput: string) {
   const playlistId = extractSpotifyPlaylistId(playlistInput);
@@ -60,18 +15,23 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
     throw new Error("Invalid Spotify playlist URL or ID.");
   }
 
-  const appAccessToken = await fetchSpotifyAppAccessToken();
-  const playlist = await fetchSpotifyPlaylistDetails(appAccessToken, playlistId);
-  const tracks = await fetchSpotifyPlaylistTracks(appAccessToken, playlist.id);
+  const playlist = await fetchSpotifyPlaylistDetails(playlistId);
+  const trackStrings = await getPlaylistTracks(playlistId);
   const items: PlaylistTrack[] = [];
 
-  for (const track of tracks) {
-    const query = `${track.title} ${track.artist} official audio`;
+  for (const trackString of trackStrings) {
+    // trackString is in format "Song Name - Artist Name"
+    const [title, artist] = trackString.split(" - ").map(s => s.trim());
+    const query = `${title} ${artist} official audio`;
     const result = await searchYoutubeVideo(query);
     const allResults = await getYoutubeSearchResults(query, 5);
 
     items.push({
-      ...track,
+      id: crypto.randomUUID(),
+      title: title || "Unknown",
+      artist: artist || "Unknown",
+      album: "",
+      spotifyTrackId: null,
       youtubeVideoId: result?.videoId ?? null,
       youtubeUrl: result?.url ?? null,
       youtubeResults: allResults,

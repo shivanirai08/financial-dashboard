@@ -1,26 +1,4 @@
-import crypto from "node:crypto";
 import { getRequiredEnv } from "@/lib/env";
-import type { SpotifyToken } from "@/lib/types";
-
-type SpotifyPlaylistResponse = {
-  items: Array<{
-    id: string;
-    name: string;
-  }>;
-  next: string | null;
-};
-
-type SpotifyTracksResponse = {
-  items: Array<{
-    track: {
-      id: string | null;
-      name: string;
-      album: { name: string };
-      artists: Array<{ name: string }>;
-    } | null;
-  }>;
-  next: string | null;
-};
 
 type SpotifyClientCredentialsToken = {
   access_token: string;
@@ -33,35 +11,15 @@ type SpotifyPlaylistDetailsResponse = {
   name: string;
 };
 
-export function createSpotifyState() {
-  return crypto.randomBytes(24).toString("hex");
-}
-
-export async function exchangeSpotifyCode(code: string): Promise<SpotifyToken> {
-  const clientId = getRequiredEnv("SPOTIFY_CLIENT_ID");
-  const clientSecret = getRequiredEnv("SPOTIFY_CLIENT_SECRET");
-  const redirectUri = getRequiredEnv("SPOTIFY_REDIRECT_URI");
-
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const response = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error("Failed to exchange Spotify authorization code.");
-  }
-
-  return response.json();
-}
+type SpotifyTracksResponse = {
+  items: Array<{
+    track: {
+      name: string;
+      artists: Array<{ name: string }>;
+    } | null;
+  }>;
+  next: string | null;
+};
 
 export function extractSpotifyPlaylistId(input: string) {
   const raw = input.trim();
@@ -70,10 +28,12 @@ export function extractSpotifyPlaylistId(input: string) {
     return null;
   }
 
+  // Direct playlist ID (22 characters)
   if (/^[a-zA-Z0-9]{22}$/.test(raw)) {
     return raw;
   }
 
+  // Extract from URL
   try {
     const parsed = new URL(raw);
     const segments = parsed.pathname.split("/").filter(Boolean);
@@ -90,40 +50,47 @@ export function extractSpotifyPlaylistId(input: string) {
   return null;
 }
 
-export async function fetchSpotifyAppAccessToken() {
+/** Get Spotify access token using client credentials (no user login needed) */
+export async function getSpotifyToken() {
   const clientId = getRequiredEnv("SPOTIFY_CLIENT_ID");
   const clientSecret = getRequiredEnv("SPOTIFY_CLIENT_SECRET");
+  
   const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
+  
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: {
-      Authorization: `Basic ${auth}`,
       "Content-Type": "application/x-www-form-urlencoded",
+      "Authorization": `Basic ${auth}`,
     },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-    }),
+    body: "grant_type=client_credentials",
   });
 
   if (!response.ok) {
-    throw new Error("Failed to get Spotify app access token.");
+    const text = await response.text();
+    console.error("[getSpotifyToken] Failed:", response.status, text);
+    throw new Error(`Spotify token error: ${response.status} ${text}`);
   }
 
   const data = (await response.json()) as SpotifyClientCredentialsToken;
   return data.access_token;
 }
 
-export async function fetchSpotifyPlaylistDetails(
-  accessToken: string,
-  playlistId: string,
-) {
-  const response = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+/** Fetch playlist details (name, ID) */
+export async function fetchSpotifyPlaylistDetails(playlistId: string) {
+  const token = await getSpotifyToken();
+  
+  const response = await fetch(
+    `https://api.spotify.com/v1/playlists/${playlistId}`,
+    {
+      headers: { "Authorization": `Bearer ${token}` },
+    }
+  );
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch Spotify playlist ${playlistId}.`);
+    const text = await response.text();
+    console.error(`[fetchSpotifyPlaylistDetails] Failed:`, response.status, text);
+    throw new Error(`Failed to fetch Spotify playlist ${playlistId}: ${response.status} ${text}`);
   }
 
   const data = (await response.json()) as SpotifyPlaylistDetailsResponse;
@@ -133,138 +100,37 @@ export async function fetchSpotifyPlaylistDetails(
   };
 }
 
-export async function refreshSpotifyToken(
-  refreshToken: string,
-): Promise<SpotifyToken> {
-  const clientId = getRequiredEnv("SPOTIFY_CLIENT_ID");
-  const clientSecret = getRequiredEnv("SPOTIFY_CLIENT_SECRET");
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
-  const response = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error("Failed to refresh Spotify token.");
-  }
-
-  const refreshed = (await response.json()) as SpotifyToken;
-  return {
-    ...refreshed,
-    refresh_token: refreshed.refresh_token ?? refreshToken,
-  };
-}
-
-export async function fetchSpotifyPlaylists(accessToken: string) {
-  const playlists: Array<{ id: string; name: string }> = [];
-  let nextUrl: string | null = "https://api.spotify.com/v1/me/playlists?limit=50";
-
-  while (nextUrl) {
-    const response = await fetch(nextUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!response.ok) {
-      throw new Error("Failed to fetch Spotify playlists.");
-    }
-
-    const data = (await response.json()) as SpotifyPlaylistResponse;
-    playlists.push(...data.items.map((item) => ({ id: item.id, name: item.name })));
-    nextUrl = data.next;
-  }
-
-  return playlists;
-}
-
-export async function fetchSpotifyPlaylistTracks(
-  accessToken: string,
-  playlistId: string,
-) {
-  const tracks: Array<{
-    id: string;
-    title: string;
-    artist: string;
-    album: string;
-    spotifyTrackId: string | null;
-  }> = [];
-
+/** Fetch playlist tracks in "Song - Artist" format for YouTube search */
+export async function getPlaylistTracks(playlistId: string): Promise<string[]> {
+  const token = await getSpotifyToken();
+  const tracks: string[] = [];
+  
   let nextUrl: string | null =
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100` +
-    `&fields=items(track(id,name,album(name),artists(name))),next`;
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&fields=items(track(name,artists(name))),next`;
 
   while (nextUrl) {
     const response = await fetch(nextUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { "Authorization": `Bearer ${token}` },
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch tracks for playlist ${playlistId}.`);
+      const text = await response.text();
+      console.error(`[getPlaylistTracks] Failed:`, response.status, text);
+      throw new Error(`Failed to fetch tracks for playlist ${playlistId}: ${response.status} ${text}`);
     }
 
     const data = (await response.json()) as SpotifyTracksResponse;
 
+    // Extract track names in "Song - Artist" format
     tracks.push(
       ...data.items
         .filter((item) => item.track)
-        .map((item) => ({
-          id: item.track?.id ?? crypto.randomUUID(),
-          title: item.track?.name ?? "Unknown track",
-          artist:
-            item.track?.artists.map((artist) => artist.name).join(", ") ??
-            "Unknown artist",
-          album: item.track?.album.name ?? "Unknown album",
-          spotifyTrackId: item.track?.id ?? null,
-        })),
+        .map((item) => `${item.track!.name} - ${item.track!.artists[0]?.name ?? "Unknown"}`)
     );
 
     nextUrl = data.next;
   }
 
+  console.log(`[getPlaylistTracks] Found ${tracks.length} tracks for ${playlistId}`);
   return tracks;
-}
-
-export async function fetchSpotifyPlaylistTrackNames(
-  accessToken: string,
-  playlistId: string,
-) {
-  const songs: Array<{ title: string; artist: string }> = [];
-
-  let nextUrl: string | null =
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100` +
-    `&fields=items(track(name,artists(name))),next`;
-
-  while (nextUrl) {
-    const response = await fetch(nextUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch track names for playlist ${playlistId}.`);
-    }
-
-    const data = (await response.json()) as SpotifyTracksResponse;
-
-    songs.push(
-      ...data.items
-        .filter((item) => item.track)
-        .map((item) => ({
-          title: item.track?.name ?? "Unknown track",
-          artist:
-            item.track?.artists.map((artist) => artist.name).join(", ") ??
-            "Unknown artist",
-        })),
-    );
-
-    nextUrl = data.next;
-  }
-
-  return songs;
 }

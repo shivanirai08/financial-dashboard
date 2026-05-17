@@ -1,25 +1,13 @@
-import { cookies } from "next/headers";
-import { NextRequest, NextResponse } from "next/server";
-import { syncSpotifyLibrary } from "@/lib/sync";
+import { NextResponse } from "next/server";
 
-export async function POST(request: NextRequest) {
-  const cookieStore = await cookies();
-  const rawToken = cookieStore.get("spotify_token")?.value;
-
-  if (!rawToken) {
-    return NextResponse.redirect(new URL("/?error=connect-spotify", request.url));
-  }
-
-  const nextToken = await syncSpotifyLibrary(rawToken);
-  const response = NextResponse.redirect(new URL("/", request.url));
-
-  response.cookies.set("spotify_token", JSON.stringify(nextToken), {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: nextToken.expires_in,
-  });
-
-  return response;
+export async function POST() {
+  return NextResponse.json(
+    {
+      message:
+        "User library sync is no longer supported. Use public playlist sync instead.",
+      info: "Submit a public Spotify playlist URL to /api/sync/public (POST with 'playlist' form field)",
+      example: "POST /api/sync/public with playlist='https://open.spotify.com/playlist/...'",
+    },
+    { status: 410 }
+  );
 }

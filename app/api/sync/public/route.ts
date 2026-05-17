@@ -14,9 +14,11 @@ export async function POST(request: NextRequest) {
   try {
     const stored = await syncSpotifyPublicPlaylist(playlistInput);
     return NextResponse.redirect(new URL(`/playlist/${stored.slug}`, request.url));
-  } catch {
+  } catch (error) {
+    console.error("[sync/public] Error:", error);
+    const errorMsg = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.redirect(
-      new URL("/?error=spotify-public-sync-failed", request.url),
+      new URL(`/?error=spotify-public-sync-failed&details=${encodeURIComponent(errorMsg)}`, request.url),
     );
   }
 }

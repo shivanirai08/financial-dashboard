@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   extractSpotifyPlaylistId,
-  fetchSpotifyAppAccessToken,
   fetchSpotifyPlaylistDetails,
-  fetchSpotifyPlaylistTrackNames,
+  getPlaylistTracks,
 } from "@/lib/spotify";
 
 export async function GET(request: NextRequest) {
@@ -27,9 +26,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const appAccessToken = await fetchSpotifyAppAccessToken();
-    const playlist = await fetchSpotifyPlaylistDetails(appAccessToken, playlistId);
-    const songs = await fetchSpotifyPlaylistTrackNames(appAccessToken, playlistId);
+    const playlist = await fetchSpotifyPlaylistDetails(playlistId);
+    const trackStrings = await getPlaylistTracks(playlistId);
+
+    // Convert "Song - Artist" format to objects
+    const songs = trackStrings.map(trackString => {
+      const [name, artist] = trackString.split(" - ").map(s => s.trim());
+      return { name, artist };
+    });
 
     return NextResponse.json({
       playlist,
