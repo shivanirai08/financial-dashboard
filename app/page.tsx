@@ -1,13 +1,56 @@
 import Link from "next/link";
 import { getStoredPlaylists } from "@/lib/storage";
 import { searchYoutubeVideos } from "@/lib/youtube";
+import {
+  extractSpotifyPlaylistId,
+  fetchSpotifyPlaylistDetails,
+  getPlaylistTracks,
+} from "@/lib/spotify";
+
+type PlaylistPreview = {
+  name: string;
+  songs: string[];
+};
 
 type HomePageProps = {
   searchParams: Promise<{
     q?: string;
     error?: string;
+    details?: string;
+    playlist?: string;
   }>;
 };
+
+async function getPlaylistPreview(playlistInput: string): Promise<{
+  data: PlaylistPreview | null;
+  error: string | null;
+}> {
+  if (!playlistInput) {
+    return { data: null, error: null };
+  }
+
+  const playlistId = extractSpotifyPlaylistId(playlistInput);
+
+  if (!playlistId) {
+    return { data: null, error: "Invalid Spotify playlist URL or playlist ID." };
+  }
+
+  try {
+    const playlist = await fetchSpotifyPlaylistDetails(playlistId);
+    const songs = await getPlaylistTracks(playlistId);
+
+    return {
+      data: {
+        name: playlist.name,
+        songs,
+      },
+      error: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to fetch playlist details.";
+    return { data: null, error: message };
+  }
+}
 
 function getErrorMessage(error: string | undefined) {
   switch (error) {
@@ -27,10 +70,12 @@ function getErrorMessage(error: string | undefined) {
 export default async function Home({ searchParams }: HomePageProps) {
   const resolvedSearchParams = await searchParams;
   const searchQuery = resolvedSearchParams.q?.trim() ?? "";
+  const playlistInput = resolvedSearchParams.playlist?.trim() ?? "";
   const errorMessage = getErrorMessage(resolvedSearchParams.error);
-  const [playlists, searchResults] = await Promise.all([
+  const [playlists, searchResults, playlistPreview] = await Promise.all([
     getStoredPlaylists(),
     searchQuery ? searchYoutubeVideos(searchQuery, 8) : Promise.resolve([]),
+    getPlaylistPreview(playlistInput),
   ]);
   const firstSearchResult = searchResults[0] ?? null;
 
@@ -56,6 +101,7 @@ export default async function Home({ searchParams }: HomePageProps) {
               <input
                 type="text"
                 name="playlist"
+                defaultValue={playlistInput}
                 required
                 className="w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-base text-white outline-none placeholder:text-slate-400 focus:border-cyan-300"
                 placeholder="https://open.spotify.com/playlist/..."
@@ -65,6 +111,44 @@ export default async function Home({ searchParams }: HomePageProps) {
               </button>
             </form>
           </div>
+
+          <form action="/" method="get" className="mt-3 flex flex-col gap-3 sm:flex-row">
+            <input
+              type="text"
+              name="playlist"
+              defaultValue={playlistInput}
+              className="w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-base text-white outline-none placeholder:text-slate-400 focus:border-cyan-300"
+              placeholder="Paste playlist URL/ID to preview songs"
+            />
+            <button className="secondary-button" type="submit">
+              Preview Playlist
+            </button>
+          </form>
+
+          {playlistPreview.error ? (
+            <p className="mt-4 rounded-xl border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+              {playlistPreview.error}
+            </p>
+          ) : null}
+
+          {playlistPreview.data ? (
+            <article className="mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Playlist Preview</p>
+              <h3 className="mt-2 text-lg font-semibold text-white">{playlistPreview.data.name}</h3>
+              <p className="mt-1 text-sm text-slate-300">
+                This playlist has {playlistPreview.data.songs.length} songs.
+              </p>
+              <div className="mt-3 max-h-64 overflow-auto rounded-lg border border-white/10 bg-slate-950/50 p-3">
+                <ol className="space-y-2 text-sm text-slate-200">
+                  {playlistPreview.data.songs.map((song, index) => (
+                    <li key={`${song}-${index}`}>
+                      <span className="text-slate-400">{index + 1}.</span> {song}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </article>
+          ) : null}
 
           <div className="mt-4">
             <div className="flex flex-col gap-3 sm:flex-row">

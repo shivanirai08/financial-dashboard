@@ -1,25 +1,149 @@
 import { getRequiredEnv } from "@/lib/env";
 
-type SpotifyClientCredentialsToken = {
-  access_token: string;
-  token_type: string;
-  expires_in: number;
-};
+type JsonRecord = Record<string, unknown>;
 
-type SpotifyPlaylistDetailsResponse = {
-  id: string;
-  name: string;
-};
+const RAPIDAPI_HOST = "spotify-web-api3.p.rapidapi.com";
+const RAPIDAPI_PLAYLIST_ENDPOINT =
+  "https://spotify-web-api3.p.rapidapi.com/v1/social/spotify/getplaylist";
 
-type SpotifyTracksResponse = {
-  items: Array<{
-    track: {
-      name: string;
-      artists: Array<{ name: string }>;
-    } | null;
-  }>;
-  next: string | null;
-};
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function pickPlaylistName(payload: unknown): string {
+  if (!isRecord(payload)) {
+    return "Unknown Playlist";
+  }
+
+  const data = isRecord(payload.data) ? payload.data : undefined;
+  const playlistV2 = isRecord(data?.playlistV2) ? data.playlistV2 : undefined;
+
+  const candidates: Array<unknown> = [
+    payload.name,
+    data?.name,
+    (payload.playlist as JsonRecord | undefined)?.name,
+    (data?.playlist as JsonRecord | undefined)?.name,
+    playlistV2?.name,
+    (playlistV2?.title as JsonRecord | undefined)?.text,
+    (payload.title as JsonRecord | undefined)?.text,
+    (data?.title as JsonRecord | undefined)?.text,
+  ];
+
+  for (const candidate of candidates) {
+    const name = asNonEmptyString(candidate);
+    if (name) {
+      return name;
+    }
+  }
+
+  return "Unknown Playlist";
+}
+
+function parseTrackString(item: unknown): string | null {
+  if (!isRecord(item)) {
+    return null;
+  }
+
+  // spotify-web-api3 payload: data.playlistV2.content.items[*].item.data
+  const itemNode = isRecord(item.item) ? item.item : item;
+  const dataNode = isRecord(itemNode.data) ? itemNode.data : itemNode;
+  const base = isRecord(dataNode.track)
+    ? dataNode.track
+    : isRecord(item.track)
+      ? item.track
+      : dataNode;
+
+  const title = asNonEmptyString(base.name);
+  const artistsField = base.artists;
+  const artists = Array.isArray(artistsField)
+    ? artistsField
+    : isRecord(artistsField) && Array.isArray(artistsField.items)
+      ? artistsField.items
+      : [];
+
+  const firstArtist = artists[0];
+  let artistName: string | null = null;
+
+  if (isRecord(firstArtist)) {
+    artistName =
+      asNonEmptyString(firstArtist.name) ??
+      asNonEmptyString((firstArtist.profile as JsonRecord | undefined)?.name);
+  }
+
+  if (!title || !artistName) {
+    return null;
+  }
+
+  return `${title} - ${artistName}`;
+}
+
+function collectTrackStrings(payload: unknown): string[] {
+  const tracks: string[] = [];
+  const seenTrackValues = new Set<string>();
+  const visited = new WeakSet<object>();
+
+  function walk(value: unknown) {
+    if (!value) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const parsed = parseTrackString(entry);
+        if (parsed && !seenTrackValues.has(parsed)) {
+          seenTrackValues.add(parsed);
+          tracks.push(parsed);
+        }
+        walk(entry);
+      }
+      return;
+    }
+
+    if (!isRecord(value)) {
+      return;
+    }
+
+    if (visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+
+    for (const nested of Object.values(value)) {
+      walk(nested);
+    }
+  }
+
+  walk(payload);
+  return tracks;
+}
+
+async function fetchPlaylistPayload(playlistId: string, limit: number) {
+  const apiKey = getRequiredEnv("RAPIDAPI_KEY");
+
+  const response = await fetch(RAPIDAPI_PLAYLIST_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-rapidapi-key": apiKey,
+      "x-rapidapi-host": RAPIDAPI_HOST,
+    },
+    body: JSON.stringify({
+      id: playlistId,
+      limit,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`RapidAPI error ${response.status}: ${text}`);
+  }
+
+  return response.json();
+}
 
 export function extractSpotifyPlaylistId(input: string) {
   const raw = input.trim();
@@ -50,87 +174,44 @@ export function extractSpotifyPlaylistId(input: string) {
   return null;
 }
 
-/** Get Spotify access token using client credentials (no user login needed) */
-export async function getSpotifyToken() {
-  const clientId = getRequiredEnv("SPOTIFY_CLIENT_ID");
-  const clientSecret = getRequiredEnv("SPOTIFY_CLIENT_SECRET");
-  
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  
-  const response = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Authorization": `Basic ${auth}`,
-    },
-    body: "grant_type=client_credentials",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    console.error("[getSpotifyToken] Failed:", response.status, text);
-    throw new Error(`Spotify token error: ${response.status} ${text}`);
-  }
-
-  const data = (await response.json()) as SpotifyClientCredentialsToken;
-  return data.access_token;
-}
-
-/** Fetch playlist details (name, ID) */
+/** Fetch playlist details using RapidAPI scraper */
 export async function fetchSpotifyPlaylistDetails(playlistId: string) {
-  const token = await getSpotifyToken();
-  
-  const response = await fetch(
-    `https://api.spotify.com/v1/playlists/${playlistId}`,
-    {
-      headers: { "Authorization": `Bearer ${token}` },
-    }
-  );
+  try {
+    const data = await fetchPlaylistPayload(playlistId, 0);
+    const name = pickPlaylistName(data);
 
-  if (!response.ok) {
-    const text = await response.text();
-    console.error(`[fetchSpotifyPlaylistDetails] Failed:`, response.status, text);
-    throw new Error(`Failed to fetch Spotify playlist ${playlistId}: ${response.status} ${text}`);
+    return {
+      id: playlistId,
+      name,
+    };
+  } catch (error) {
+    console.error("[fetchSpotifyPlaylistDetails] Error:", error);
+    throw error;
   }
-
-  const data = (await response.json()) as SpotifyPlaylistDetailsResponse;
-  return {
-    id: data.id,
-    name: data.name,
-  };
 }
 
 /** Fetch playlist tracks in "Song - Artist" format for YouTube search */
 export async function getPlaylistTracks(playlistId: string): Promise<string[]> {
-  const token = await getSpotifyToken();
-  const tracks: string[] = [];
-  
-  let nextUrl: string | null =
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&fields=items(track(name,artists(name))),next`;
+  try {
+    console.log(`[getPlaylistTracks] Fetching tracks for ${playlistId}...`);
 
-  while (nextUrl) {
-    const response = await fetch(nextUrl, {
-      headers: { "Authorization": `Bearer ${token}` },
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.error(`[getPlaylistTracks] Failed:`, response.status, text);
-      throw new Error(`Failed to fetch tracks for playlist ${playlistId}: ${response.status} ${text}`);
-    }
-
-    const data = (await response.json()) as SpotifyTracksResponse;
-
-    // Extract track names in "Song - Artist" format
-    tracks.push(
-      ...data.items
-        .filter((item) => item.track)
-        .map((item) => `${item.track!.name} - ${item.track!.artists[0]?.name ?? "Unknown"}`)
+    const data = await fetchPlaylistPayload(playlistId, 300);
+    console.log(
+      `[getPlaylistTracks] Response received:`,
+      JSON.stringify(data).substring(0, 200)
     );
 
-    nextUrl = data.next;
-  }
+    const tracks = collectTrackStrings(data);
 
-  console.log(`[getPlaylistTracks] Found ${tracks.length} tracks for ${playlistId}`);
-  return tracks;
+    if (tracks.length === 0) {
+      console.error("[getPlaylistTracks] No tracks found in payload:", data);
+      throw new Error("Invalid response from RapidAPI - missing tracks data");
+    }
+
+    console.log(`[getPlaylistTracks] Found ${tracks.length} tracks for ${playlistId}`);
+    return tracks;
+  } catch (error) {
+    console.error(`[getPlaylistTracks] Error:`, error);
+    throw error;
+  }
 }

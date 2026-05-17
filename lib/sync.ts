@@ -9,14 +9,22 @@ import { searchYoutubeVideo, getYoutubeSearchResults } from "@/lib/youtube";
 import crypto from "node:crypto";
 
 export async function syncSpotifyPublicPlaylist(playlistInput: string) {
+  console.log(`[syncSpotifyPublicPlaylist] Starting sync for: ${playlistInput}`);
+  
   const playlistId = extractSpotifyPlaylistId(playlistInput);
 
   if (!playlistId) {
     throw new Error("Invalid Spotify playlist URL or ID.");
   }
 
+  console.log(`[syncSpotifyPublicPlaylist] Extracted playlist ID: ${playlistId}`);
+
   const playlist = await fetchSpotifyPlaylistDetails(playlistId);
+  console.log(`[syncSpotifyPublicPlaylist] Fetched playlist: ${playlist.name}`);
+
   const trackStrings = await getPlaylistTracks(playlistId);
+  console.log(`[syncSpotifyPublicPlaylist] Fetched ${trackStrings.length} tracks`);
+
   const items: PlaylistTrack[] = [];
 
   for (const trackString of trackStrings) {
@@ -39,11 +47,14 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
     });
   }
 
-  return storePlaylist({
+  const stored = await storePlaylist({
     id: playlist.id,
     name: playlist.name,
     source: "spotify",
     syncedAt: new Date().toISOString(),
     items,
   });
+
+  console.log(`[syncSpotifyPublicPlaylist] Successfully synced: ${stored.slug}`);
+  return stored;
 }
