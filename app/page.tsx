@@ -1,16 +1,12 @@
 import Link from "next/link";
-import { getStoredPlaylists } from "@/lib/storage";
+import { createServerSupabase } from "@/lib/supabase";
 import { searchYoutubeVideos } from "@/lib/youtube";
 import {
   extractSpotifyPlaylistId,
   fetchSpotifyPlaylistDetails,
   getPlaylistTracks,
 } from "@/lib/spotify";
-
-type PlaylistPreview = {
-  name: string;
-  songs: string[];
-};
+import type { DbPlaylist } from "@/lib/types";
 
 type HomePageProps = {
   searchParams: Promise<{
@@ -22,7 +18,7 @@ type HomePageProps = {
 };
 
 async function getPlaylistPreview(playlistInput: string): Promise<{
-  data: PlaylistPreview | null;
+  data: { name: string; songs: string[] } | null;
   error: string | null;
 }> {
   if (!playlistInput) {
@@ -73,7 +69,19 @@ export default async function Home({ searchParams }: HomePageProps) {
   const playlistInput = resolvedSearchParams.playlist?.trim() ?? "";
   const errorMessage = getErrorMessage(resolvedSearchParams.error);
   const [playlists, searchResults, playlistPreview] = await Promise.all([
-    getStoredPlaylists(),
+    (async () => {
+      try {
+        const supabase = createServerSupabase();
+        const { data } = await supabase
+          .from("playlists")
+          .select("id, name, slug, created_at")
+          .order("created_at", { ascending: false })
+          .limit(12);
+        return (data ?? []) as Pick<DbPlaylist, "id" | "name" | "slug" | "created_at">[];
+      } catch {
+        return [];
+      }
+    })(),
     searchQuery ? searchYoutubeVideos(searchQuery, 8) : Promise.resolve([]),
     getPlaylistPreview(playlistInput),
   ]);
