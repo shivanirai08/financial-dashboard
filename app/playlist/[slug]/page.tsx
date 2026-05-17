@@ -1,3 +1,6 @@
+'use client';
+
+import { useState, useEffect } from 'react';
 import { notFound } from "next/navigation";
 import { getStoredPlaylistBySlug } from "@/lib/storage";
 
@@ -5,12 +8,37 @@ type PlaylistPageProps = {
   params: Promise<{ slug: string }>;
 };
 
-export default async function PlaylistPage({ params }: PlaylistPageProps) {
-  const { slug } = await params;
-  const playlist = await getStoredPlaylistBySlug(slug);
+type Playlist = Awaited<ReturnType<typeof getStoredPlaylistBySlug>>;
+
+export default function PlaylistPage({ params }: PlaylistPageProps) {
+  const [playlist, setPlaylist] = useState<Playlist | null>(null);
+  const [showVideo, setShowVideo] = useState(false);
+  const [notFoundFlag, setNotFoundFlag] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { slug } = await params;
+      const data = await getStoredPlaylistBySlug(slug);
+      if (!data) {
+        setNotFoundFlag(true);
+      } else {
+        setPlaylist(data);
+      }
+    })();
+  }, [params]);
+
+  if (notFoundFlag) {
+    notFound();
+  }
 
   if (!playlist) {
-    notFound();
+    return (
+      <main className="min-h-screen bg-[linear-gradient(180deg,_#07111f_0%,_#04070d_100%)] px-6 py-10 text-white sm:px-8">
+        <div className="mx-auto w-full max-w-6xl">
+          <p>Loading...</p>
+        </div>
+      </main>
+    );
   }
 
   const firstPlayable = playlist.items.find((item) => item.youtubeVideoId);
@@ -34,19 +62,36 @@ export default async function PlaylistPage({ params }: PlaylistPageProps) {
 
         <section className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div className="rounded-[2rem] border border-white/10 bg-slate-950/60 p-4">
-            {firstPlayable ? (
-              <iframe
-                className="aspect-video w-full rounded-[1.25rem] border border-white/10"
-                src={`https://www.youtube.com/embed/${firstPlayable.youtubeVideoId}`}
-                title={firstPlayable.title}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
-            ) : (
-              <div className="flex aspect-video items-center justify-center rounded-[1.25rem] border border-dashed border-white/15 text-sm text-slate-400">
-                No matched video is available for preview yet.
-              </div>
-            )}
+            <div className="flex flex-col gap-4">
+              <button
+                onClick={() => setShowVideo(!showVideo)}
+                className="inline-flex w-fit items-center justify-center gap-2 rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-white/15 hover:border-white/30"
+              >
+                {showVideo ? '🎵 Hide Video' : '🎬 Show Video'}
+              </button>
+              
+              {showVideo ? (
+                <div className="transition-opacity duration-300 ease-in-out">
+                  {firstPlayable ? (
+                    <iframe
+                      className="aspect-video w-full rounded-[1.25rem] border border-white/10"
+                      src={`https://www.youtube.com/embed/${firstPlayable.youtubeVideoId}`}
+                      title={firstPlayable.title}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : (
+                    <div className="flex aspect-video items-center justify-center rounded-[1.25rem] border border-dashed border-white/15 text-sm text-slate-400">
+                      No matched video is available for preview yet.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex aspect-video items-center justify-center rounded-[1.25rem] border border-dashed border-white/15 text-sm text-slate-400 bg-white/5">
+                  Video hidden • Click &quot;Show Video&quot; to view
+                </div>
+              )}
+            </div>
           </div>
           <div className="grid gap-3">
             {playlist.items.map((item) => (
