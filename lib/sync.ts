@@ -8,7 +8,7 @@ import {
   refreshSpotifyToken,
 } from "@/lib/spotify";
 import { storePlaylist } from "@/lib/storage";
-import { searchYoutubeVideo } from "@/lib/youtube";
+import { searchYoutubeVideo, getYoutubeSearchResults } from "@/lib/youtube";
 
 function parseSpotifyToken(rawToken: string) {
   return JSON.parse(rawToken) as SpotifyToken;
@@ -28,14 +28,15 @@ export async function syncSpotifyLibrary(rawToken: string) {
     const items: PlaylistTrack[] = [];
 
     for (const track of tracks) {
-      const result = await searchYoutubeVideo(
-        `${track.title} ${track.artist} official audio`,
-      );
+      const query = `${track.title} ${track.artist} official audio`;
+      const result = await searchYoutubeVideo(query);
+      const allResults = await getYoutubeSearchResults(query, 5);
 
       items.push({
         ...track,
         youtubeVideoId: result?.videoId ?? null,
         youtubeUrl: result?.url ?? null,
+        youtubeResults: allResults,
         matchStatus: result ? "matched" : "unmatched",
       });
     }
@@ -65,14 +66,15 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
   const items: PlaylistTrack[] = [];
 
   for (const track of tracks) {
-    const result = await searchYoutubeVideo(
-      `${track.title} ${track.artist} official audio`,
-    );
+    const query = `${track.title} ${track.artist} official audio`;
+    const result = await searchYoutubeVideo(query);
+    const allResults = await getYoutubeSearchResults(query, 5);
 
     items.push({
       ...track,
       youtubeVideoId: result?.videoId ?? null,
       youtubeUrl: result?.url ?? null,
+      youtubeResults: allResults,
       matchStatus: result ? "matched" : "unmatched",
     });
   }

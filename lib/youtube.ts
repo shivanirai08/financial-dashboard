@@ -1,4 +1,5 @@
 import ytSearch from "yt-search";
+import type { YoutubeSearchResult } from "./types";
 
 type YtAuthor = {
   name?: string;
@@ -47,6 +48,16 @@ export async function searchYoutubeVideos(query: string, limit = 10) {
         url: `https://www.youtube.com/watch?v=${videoId}`,
       } satisfies YoutubeSearchItem;
     });
+}
+
+export async function getYoutubeSearchResults(query: string, limit = 5): Promise<YoutubeSearchResult[]> {
+  const results = await searchYoutubeVideos(query, limit);
+  return results.map(result => ({
+    videoId: result.videoId,
+    url: result.url,
+    title: result.title,
+    channel: result.artist,
+  }));
 }
 
 export async function searchYoutubeVideo(query: string) {
