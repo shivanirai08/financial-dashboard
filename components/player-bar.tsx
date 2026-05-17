@@ -15,6 +15,10 @@ import {
   ListMusic,
   Music,
   X,
+  Maximize2,
+  Minimize2,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
 
@@ -48,6 +52,31 @@ export function PlayerBar() {
   } = usePlayerStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoPanelRef = useRef<HTMLDivElement>(null);
+
+  type VideoSize = "sm" | "md" | "lg";
+  const VIDEO_WIDTHS: Record<VideoSize, number> = { sm: 320, md: 500, lg: 700 };
+  const VIDEO_SIZE_NEXT: Record<VideoSize, VideoSize> = { sm: "md", md: "lg", lg: "sm" };
+  const [videoSize, setVideoSize] = useState<VideoSize>("sm");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Track native fullscreen state changes
+  useEffect(() => {
+    function handleFsChange() {
+      setIsFullscreen(!!document.fullscreenElement);
+    }
+    document.addEventListener("fullscreenchange", handleFsChange);
+    return () => document.removeEventListener("fullscreenchange", handleFsChange);
+  }, []);
+
+  function toggleFullscreen() {
+    if (!videoPanelRef.current) return;
+    if (!document.fullscreenElement) {
+      videoPanelRef.current.requestFullscreen?.();
+    } else {
+      document.exitFullscreen?.();
+    }
+  }
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playNextRef = useRef(playNext);
@@ -167,17 +196,48 @@ export function PlayerBar() {
 
   return (
     <>
-      {/* ── Hidden YT player — always in DOM so audio never interrupts ─── */}
+      {/* ── Floating video panel ─────────────────────────────────────────── */}
       <div
-        className="fixed z-50 overflow-hidden rounded-2xl border border-white/15 bg-black shadow-2xl transition-all duration-300 ease-in-out"
+        ref={videoPanelRef}
+        className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl transition-all duration-300 ease-in-out"
         style={{
-          width: 340,
-          bottom: showVideo && currentSong ? 88 : -400,
-          right: 24,
+          width: VIDEO_WIDTHS[videoSize],
+          bottom: showVideo && currentSong ? 88 : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
+          right: isFullscreen ? 0 : 20,
           opacity: showVideo && currentSong ? 1 : 0,
           pointerEvents: showVideo && currentSong ? "auto" : "none",
         }}
       >
+        {/* Video panel header */}
+        <div className="flex items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm">
+          <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-300">
+            {currentSong?.title ?? ""}
+          </p>
+          {/* Cycle size */}
+          <button
+            onClick={() => setVideoSize((s) => VIDEO_SIZE_NEXT[s])}
+            title={`Size: ${videoSize.toUpperCase()} — click to change`}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:text-white"
+          >
+            {videoSize === "lg" ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+          </button>
+          {/* Fullscreen */}
+          <button
+            onClick={toggleFullscreen}
+            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:text-white"
+          >
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+          </button>
+          {/* Close */}
+          <button
+            onClick={toggleVideo}
+            title="Hide video"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:text-white"
+          >
+            <X size={13} />
+          </button>
+        </div>
         <div ref={containerRef} className="aspect-video w-full" />
       </div>
 
@@ -191,7 +251,7 @@ export function PlayerBar() {
         <div className="mx-auto max-w-2xl">
           <div className="flex items-center justify-between px-5 py-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Queue · {queue.length} songs
+              Queue · {queue.filter((i) => songs[i]?.youtube_video_id).length} playable
             </p>
             <button
               onClick={toggleQueue}
@@ -204,7 +264,8 @@ export function PlayerBar() {
           <div className="max-h-64 overflow-y-auto pb-3">
             {queue.map((songIndex, queueIdx) => {
               const s = songs[songIndex];
-              if (!s) return null;
+              // Only show songs that have a YouTube match
+              if (!s || !s.youtube_video_id) return null;
               const isCurrent = queueIdx === currentQueuePos;
               return (
                 <button

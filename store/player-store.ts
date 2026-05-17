@@ -25,6 +25,8 @@ type PlayerStore = {
   toggleQueue: () => void;
   updateLike: (songId: string, liked: boolean) => void;
   updateSongVideoId: (songId: string, videoId: string, url: string | null, thumbnail: string | null) => void;
+  addSong: (song: DbSong) => void;
+  removeSong: (songId: string) => void;
 };
 
 function makeDefaultQueue(count: number) {
@@ -151,5 +153,46 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       currentSong:
         s.currentSong?.id === songId ? { ...s.currentSong, liked } : s.currentSong,
     }));
+  },
+
+  addSong(song) {
+    set((s) => ({
+      songs: [...s.songs, song],
+      queue: [...s.queue, s.songs.length],
+    }));
+  },
+
+  removeSong(songId) {
+    const { songs, queue, currentQueuePos, currentSong } = get();
+    const songIndex = songs.findIndex((s) => s.id === songId);
+    if (songIndex < 0) return;
+
+    const newSongs = songs.filter((_, i) => i !== songIndex);
+    // Remove queue entries pointing to removed song, shift down higher indices
+    const newQueue = queue
+      .filter((i) => i !== songIndex)
+      .map((i) => (i > songIndex ? i - 1 : i));
+
+    // Adjust currentQueuePos if needed
+    const removedQueueIdx = queue.indexOf(songIndex);
+    let newQueuePos = currentQueuePos;
+    if (removedQueueIdx >= 0 && removedQueueIdx < currentQueuePos) {
+      newQueuePos = currentQueuePos - 1;
+    }
+    newQueuePos = Math.max(0, Math.min(newQueuePos, newQueue.length - 1));
+
+    const newCurrentSong =
+      currentSong?.id === songId
+        ? newQueue.length > 0
+          ? newSongs[newQueue[newQueuePos]] ?? null
+          : null
+        : currentSong;
+
+    set({
+      songs: newSongs,
+      queue: newQueue,
+      currentQueuePos: newQueue.length > 0 ? newQueuePos : -1,
+      currentSong: newCurrentSong,
+    });
   },
 }));

@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
-import { Play, Pause, Heart, Video, Music, Search, AlertCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Play, Pause, Heart, Video, Music, MoreVertical, Pencil, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import type { DbSong } from "@/lib/types";
 import { usePlayerStore } from "@/store/player-store";
 import { FixSongModal } from "./fix-song-modal";
+import { useToastStore } from "@/store/toast-store";
 
 type SongCardProps = {
   song: DbSong;
@@ -12,18 +14,37 @@ type SongCardProps = {
 };
 
 export function SongCard({ song, index }: SongCardProps) {
-  const { currentSong, isPlaying, playAtIndex, toggleVideo, updateLike } = usePlayerStore();
+  const router = useRouter();
+  const { currentSong, isPlaying, playAtIndex, toggleVideo, updateLike, removeSong } =
+    usePlayerStore();
 
   const isActive = currentSong?.id === song.id;
   const [liked, setLiked] = useState(song.liked ?? false);
   const [likeLoading, setLikeLoading] = useState(false);
   const [showFixModal, setShowFixModal] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const addToast = useToastStore((s) => s.addToast);
 
   // We read the video id from the store so it updates immediately after a fix
   const storeVideo = usePlayerStore(
     (s) => s.songs.find((s2) => s2.id === song.id)?.youtube_video_id ?? song.youtube_video_id
   );
   const hasVideo = Boolean(storeVideo);
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [menuOpen]);
 
   function handlePlay() {
     if (hasVideo) playAtIndex(index);
@@ -57,6 +78,23 @@ export function SongCard({ song, index }: SongCardProps) {
     }
   }
 
+  async function handleRemove(e: React.MouseEvent) {
+    e.stopPropagation();
+    setMenuOpen(false);
+    setRemoving(true);
+    try {
+      const res = await fetch(`/api/songs/${song.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      removeSong(song.id);
+      // Refresh the server component so counts update
+      router.refresh();
+      addToast("Song removed", "success");
+    } catch {
+      addToast("Failed to remove song", "error");
+      setRemoving(false);
+    }
+  }
+
   return (
     <>
       <article
@@ -64,6 +102,8 @@ export function SongCard({ song, index }: SongCardProps) {
         className={`group relative flex cursor-pointer items-center gap-3 rounded-2xl border p-3 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
+            : removing
+            ? "border-rose-500/20 bg-rose-500/5 opacity-50"
             : "border-white/[0.07] bg-white/[0.02]"
         } ${!hasVideo ? "cursor-default" : ""}`}
       >
@@ -82,7 +122,6 @@ export function SongCard({ song, index }: SongCardProps) {
               <Music size={22} />
             </div>
           )}
-          {/* Active play / pause overlay */}
           {isActive && hasVideo && (
             <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/55">
               {isPlaying ? (
@@ -92,7 +131,6 @@ export function SongCard({ song, index }: SongCardProps) {
               )}
             </div>
           )}
-          {/* Hover play overlay (only when not active and has video) */}
           {!isActive && hasVideo && (
             <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
               <Play size={18} className="text-white" />
@@ -110,36 +148,17 @@ export function SongCard({ song, index }: SongCardProps) {
             {song.title}
           </p>
           <p className="mt-0.5 truncate text-xs text-slate-400">{song.artist}</p>
-
-          {/* No match badge — always visible, not hover-gated */}
           {!hasVideo && (
-            <div className="mt-1 flex items-center gap-1">
-              <AlertCircle size={10} className="text-rose-400/70" />
-              <span className="text-[10px] font-medium uppercase tracking-wide text-rose-400/70">
-                No match
-              </span>
-            </div>
+            <p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-rose-400/70">
+              No YouTube match
+            </p>
           )}
         </div>
 
         {/* Right-side actions */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          {/* Fix button — always visible when no video */}
-          {!hasVideo && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowFixModal(true);
-              }}
-              title="Find on YouTube"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-rose-400/25 bg-rose-400/8 text-rose-400 transition-all hover:bg-rose-400/15"
-            >
-              <Search size={14} />
-            </button>
-          )}
-
-          {/* Hover-only actions */}
-          <div className="flex items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Hover-only: watch + like */}
+          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             {hasVideo && (
               <button
                 onClick={handleWatchVideo}
@@ -162,14 +181,51 @@ export function SongCard({ song, index }: SongCardProps) {
             </button>
           </div>
 
-          {/* Position number — fades out on hover */}
-          <span className="ml-1 min-w-[1.5rem] text-right text-[10px] tabular-nums text-slate-600 transition-opacity group-hover:opacity-0">
-            {index + 1}
-          </span>
+          {/* 3-dot menu — always visible */}
+          <div className="relative" ref={menuRef}>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((v) => !v);
+              }}
+              title="More options"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white"
+            >
+              <MoreVertical size={15} />
+            </button>
+
+            {/* Dropdown */}
+            {menuOpen && (
+              <div
+                className="absolute right-0 top-9 z-30 min-w-[180px] overflow-hidden rounded-xl border border-white/12 bg-[#0d1825] shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    setShowFixModal(true);
+                  }}
+                  className="flex w-full items-center gap-3 px-4 py-2.5 text-sm text-slate-200 transition-colors hover:bg-white/8"
+                >
+                  <Pencil size={14} className="text-slate-400" />
+                  Change YouTube match
+                </button>
+                <div className="mx-3 my-0.5 border-t border-white/8" />
+                <button
+                  onClick={handleRemove}
+                  disabled={removing}
+                  className="flex w-full items-center gap-3 px-4 py-2.5 text-sm text-rose-400 transition-colors hover:bg-rose-400/8 disabled:opacity-50"
+                >
+                  <Trash2 size={14} />
+                  Remove from playlist
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </article>
 
-      {/* Fix modal — portal-like, rendered outside article */}
       {showFixModal && (
         <FixSongModal song={song} onClose={() => setShowFixModal(false)} />
       )}

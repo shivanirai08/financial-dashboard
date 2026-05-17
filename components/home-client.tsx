@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { Music, Plus, X, Loader2 } from "lucide-react";
 
 type SongPreview = { name: string; artist: string };
 type PreviewData = { playlistName: string; totalSongs: number; songs: SongPreview[] };
@@ -35,6 +36,12 @@ export function HomeClient({ playlists }: Props) {
   const [ytResults, setYtResults] = useState<YtItem[]>([]);
   const [ytLoading, setYtLoading] = useState(false);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+
+  // ── Create playlist ──────────────────────────────────────────────────────
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -101,6 +108,26 @@ export function HomeClient({ playlists }: Props) {
     }
   }
 
+  async function handleCreatePlaylist() {
+    const name = newPlaylistName.trim();
+    if (!name) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const res = await fetch("/api/playlists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to create");
+      router.push(`/playlist/${data.playlist.slug}`);
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : "Unknown error");
+      setCreating(false);
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -163,7 +190,7 @@ export function HomeClient({ playlists }: Props) {
           {/* Sync loading detail */}
           {syncLoading && (
             <div className="mt-4 flex items-start gap-3 rounded-xl border border-cyan-400/20 bg-cyan-400/5 px-4 py-3 text-sm text-cyan-200">
-              <span className="mt-0.5 text-base">⏳</span>
+              <Loader2 size={16} className="mt-0.5 shrink-0 animate-spin" />
               <div>
                 <p className="font-semibold">Syncing playlist — please wait</p>
                 <p className="mt-0.5 text-xs text-slate-400">
@@ -283,11 +310,22 @@ export function HomeClient({ playlists }: Props) {
           )}
         </section>
 
-        {/* ── Synced playlists ── */}
-        {playlists.length > 0 && (
-          <section className="panel">
-            <p className="panel-kicker">Library</p>
-            <h2 className="panel-title">Synced playlists</h2>
+        {/* ── Library ── */}
+        <section className="panel">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="panel-kicker">Library</p>
+              <h2 className="panel-title">Playlists</h2>
+            </div>
+            <button
+              onClick={() => { setShowCreateModal(true); setNewPlaylistName(""); setCreateError(null); }}
+              className="flex items-center gap-1.5 rounded-xl border border-cyan-400/25 bg-cyan-400/8 px-3 py-2 text-sm text-cyan-300 transition-all hover:bg-cyan-400/15"
+            >
+              <Plus size={14} />
+              New playlist
+            </button>
+          </div>
+          {playlists.length > 0 ? (
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
               {playlists.map((pl) => (
                 <Link
@@ -295,7 +333,7 @@ export function HomeClient({ playlists }: Props) {
                   href={`/playlist/${pl.slug}`}
                   className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/[0.02] px-4 py-3 text-sm text-white transition-all hover:border-cyan-400/30 hover:bg-white/[0.05]"
                 >
-                  <span className="text-base">🎵</span>
+                  <Music size={16} className="shrink-0 text-slate-500" />
                   <div className="min-w-0">
                     <p className="truncate font-medium">{pl.name}</p>
                     <p className="text-xs text-slate-500">
@@ -305,7 +343,45 @@ export function HomeClient({ playlists }: Props) {
                 </Link>
               ))}
             </div>
-          </section>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">
+              No playlists yet. Import a Spotify playlist or create one manually.
+            </p>
+          )}
+        </section>
+
+        {/* ── Create playlist modal ── */}
+        {showCreateModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowCreateModal(false)} />
+            <div className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-[#0d1825] p-6 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-white">New Playlist</p>
+                <button onClick={() => setShowCreateModal(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:text-white">
+                  <X size={15} />
+                </button>
+              </div>
+              <input
+                value={newPlaylistName}
+                onChange={(e) => setNewPlaylistName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleCreatePlaylist()}
+                autoFocus
+                placeholder="Playlist name"
+                className="mt-4 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-500 focus:border-cyan-500/50"
+              />
+              {createError && (
+                <p className="mt-2 text-xs text-rose-400">{createError}</p>
+              )}
+              <button
+                onClick={handleCreatePlaylist}
+                disabled={creating || !newPlaylistName.trim()}
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 py-2.5 text-sm font-semibold text-white transition-opacity disabled:opacity-40 hover:bg-cyan-400"
+              >
+                {creating ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
+                Create
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </main>
@@ -313,19 +389,5 @@ export function HomeClient({ playlists }: Props) {
 }
 
 function Spinner() {
-  return (
-    <svg
-      className="h-4 w-4 animate-spin"
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-    >
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8v4l3-3-3-3v4A8 8 0 004 12z"
-      />
-    </svg>
-  );
+  return <Loader2 className="h-4 w-4 animate-spin" />;
 }
