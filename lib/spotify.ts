@@ -196,7 +196,9 @@ export async function fetchSpotifyPlaylistTracks(
     spotifyTrackId: string | null;
   }> = [];
 
-  let nextUrl: string | null = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
+  let nextUrl: string | null =
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100` +
+    `&fields=items(track(id,name,album(name),artists(name))),next`;
 
   while (nextUrl) {
     const response = await fetch(nextUrl, {
@@ -227,4 +229,42 @@ export async function fetchSpotifyPlaylistTracks(
   }
 
   return tracks;
+}
+
+export async function fetchSpotifyPlaylistTrackNames(
+  accessToken: string,
+  playlistId: string,
+) {
+  const songs: Array<{ title: string; artist: string }> = [];
+
+  let nextUrl: string | null =
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100` +
+    `&fields=items(track(name,artists(name))),next`;
+
+  while (nextUrl) {
+    const response = await fetch(nextUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch track names for playlist ${playlistId}.`);
+    }
+
+    const data = (await response.json()) as SpotifyTracksResponse;
+
+    songs.push(
+      ...data.items
+        .filter((item) => item.track)
+        .map((item) => ({
+          title: item.track?.name ?? "Unknown track",
+          artist:
+            item.track?.artists.map((artist) => artist.name).join(", ") ??
+            "Unknown artist",
+        })),
+    );
+
+    nextUrl = data.next;
+  }
+
+  return songs;
 }
