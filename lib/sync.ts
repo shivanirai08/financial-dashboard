@@ -1,5 +1,8 @@
 import type { PlaylistTrack, SpotifyToken } from "@/lib/types";
 import {
+  extractSpotifyPlaylistId,
+  fetchSpotifyAppAccessToken,
+  fetchSpotifyPlaylistDetails,
   fetchSpotifyPlaylists,
   fetchSpotifyPlaylistTracks,
   refreshSpotifyToken,
@@ -47,4 +50,38 @@ export async function syncSpotifyLibrary(rawToken: string) {
   }
 
   return token;
+}
+
+export async function syncSpotifyPublicPlaylist(playlistInput: string) {
+  const playlistId = extractSpotifyPlaylistId(playlistInput);
+
+  if (!playlistId) {
+    throw new Error("Invalid Spotify playlist URL or ID.");
+  }
+
+  const appAccessToken = await fetchSpotifyAppAccessToken();
+  const playlist = await fetchSpotifyPlaylistDetails(appAccessToken, playlistId);
+  const tracks = await fetchSpotifyPlaylistTracks(appAccessToken, playlist.id);
+  const items: PlaylistTrack[] = [];
+
+  for (const track of tracks) {
+    const result = await searchYoutubeVideo(
+      `${track.title} ${track.artist} official audio`,
+    );
+
+    items.push({
+      ...track,
+      youtubeVideoId: result?.videoId ?? null,
+      youtubeUrl: result?.url ?? null,
+      matchStatus: result ? "matched" : "unmatched",
+    });
+  }
+
+  return storePlaylist({
+    id: playlist.id,
+    name: playlist.name,
+    source: "spotify",
+    syncedAt: new Date().toISOString(),
+    items,
+  });
 }

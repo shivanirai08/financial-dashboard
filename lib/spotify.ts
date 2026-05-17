@@ -22,6 +22,17 @@ type SpotifyTracksResponse = {
   next: string | null;
 };
 
+type SpotifyClientCredentialsToken = {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+};
+
+type SpotifyPlaylistDetailsResponse = {
+  id: string;
+  name: string;
+};
+
 export function createSpotifyState() {
   return crypto.randomBytes(24).toString("hex");
 }
@@ -50,6 +61,76 @@ export async function exchangeSpotifyCode(code: string): Promise<SpotifyToken> {
   }
 
   return response.json();
+}
+
+export function extractSpotifyPlaylistId(input: string) {
+  const raw = input.trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  if (/^[a-zA-Z0-9]{22}$/.test(raw)) {
+    return raw;
+  }
+
+  try {
+    const parsed = new URL(raw);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const playlistIndex = segments.findIndex((segment) => segment === "playlist");
+    const candidate = playlistIndex >= 0 ? segments[playlistIndex + 1] : null;
+
+    if (candidate && /^[a-zA-Z0-9]{22}$/.test(candidate)) {
+      return candidate;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+export async function fetchSpotifyAppAccessToken() {
+  const clientId = getRequiredEnv("SPOTIFY_CLIENT_ID");
+  const clientSecret = getRequiredEnv("SPOTIFY_CLIENT_SECRET");
+  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to get Spotify app access token.");
+  }
+
+  const data = (await response.json()) as SpotifyClientCredentialsToken;
+  return data.access_token;
+}
+
+export async function fetchSpotifyPlaylistDetails(
+  accessToken: string,
+  playlistId: string,
+) {
+  const response = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Spotify playlist ${playlistId}.`);
+  }
+
+  const data = (await response.json()) as SpotifyPlaylistDetailsResponse;
+  return {
+    id: data.id,
+    name: data.name,
+  };
 }
 
 export async function refreshSpotifyToken(
