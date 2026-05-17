@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { PlayerBar } from "@/components/player-bar";
+import { Toaster } from "@/components/toaster";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -37,6 +38,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col pb-24">
         {children}
         <PlayerBar />
+        <Toaster />
       </body>
     </html>
   );

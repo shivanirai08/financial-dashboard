@@ -54,7 +54,7 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
     let duration: number | null = null;
 
     try {
-      const results = await searchYoutubeVideos(`${title} ${artist} official audio`, 1);
+      const results = await searchYoutubeVideos(`${title} ${artist} song`, 1);
       const first = results[0];
       if (first) {
         videoId = first.videoId;
@@ -65,6 +65,9 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
     } catch (err) {
       console.warn(`[syncSpotifyPublicPlaylist] YouTube search failed for "${title}": ${err}`);
     }
+
+    // Small delay to avoid YouTube rate limiting (302 redirects) during batch sync
+    await new Promise((r) => setTimeout(r, 300));
 
     songsToInsert.push({
       playlist_id: savedPlaylist.id,

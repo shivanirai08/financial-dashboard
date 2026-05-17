@@ -12,6 +12,7 @@ type PlayerStore = {
   isShuffle: boolean;
   repeatMode: RepeatMode;
   currentSong: DbSong | null;
+  showQueue: boolean;
 
   initPlaylist: (songs: DbSong[]) => void;
   playAtIndex: (songIndex: number) => void;
@@ -21,7 +22,9 @@ type PlayerStore = {
   toggleShuffle: () => void;
   cycleRepeat: () => void;
   toggleVideo: () => void;
+  toggleQueue: () => void;
   updateLike: (songId: string, liked: boolean) => void;
+  updateSongVideoId: (songId: string, videoId: string, url: string | null, thumbnail: string | null) => void;
 };
 
 function makeDefaultQueue(count: number) {
@@ -43,6 +46,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   currentQueuePos: -1,
   isPlaying: false,
   showVideo: false,
+  showQueue: false,
   isShuffle: false,
   repeatMode: "off",
   currentSong: null,
@@ -121,6 +125,24 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
 
   toggleVideo() {
     set((s) => ({ showVideo: !s.showVideo }));
+  },
+
+  toggleQueue() {
+    set((s) => ({ showQueue: !s.showQueue }));
+  },
+
+  updateSongVideoId(songId, videoId, url, thumbnail) {
+    set((s) => ({
+      songs: s.songs.map((song) =>
+        song.id === songId
+          ? { ...song, youtube_video_id: videoId, youtube_url: url, thumbnail: thumbnail ?? song.thumbnail }
+          : song
+      ),
+      currentSong:
+        s.currentSong?.id === songId
+          ? { ...s.currentSong, youtube_video_id: videoId, youtube_url: url, thumbnail: thumbnail ?? s.currentSong.thumbnail }
+          : s.currentSong,
+    }));
   },
 
   updateLike(songId, liked) {

@@ -1,6 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Shuffle,
+  Repeat,
+  Repeat1,
+  Heart,
+  Video,
+  VideoOff,
+  ListMusic,
+  Music,
+  X,
+} from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
 
 function formatTime(sec: number) {
@@ -15,14 +30,20 @@ export function PlayerBar() {
     currentSong,
     isPlaying,
     showVideo,
+    showQueue,
     isShuffle,
     repeatMode,
+    songs,
+    queue,
+    currentQueuePos,
     playNext,
     playPrev,
+    playAtIndex,
     setIsPlaying,
     toggleShuffle,
     cycleRepeat,
     toggleVideo,
+    toggleQueue,
     updateLike,
   } = usePlayerStore();
 
@@ -46,7 +67,6 @@ export function PlayerBar() {
       events: {
         onStateChange(event) {
           if (event.data === 1) {
-            // PLAYING
             setIsPlaying(true);
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
@@ -59,10 +79,8 @@ export function PlayerBar() {
               }, 500);
             }
           } else if (event.data === 2) {
-            // PAUSED
             setIsPlaying(false);
           } else if (event.data === 0) {
-            // ENDED
             if (intervalRef.current) {
               clearInterval(intervalRef.current);
               intervalRef.current = null;
@@ -99,18 +117,16 @@ export function PlayerBar() {
     if (!currentSong?.youtube_video_id) return;
     setProgress(0);
     setDuration(0);
-    setLiked(currentSong.liked);
+    setLiked(currentSong.liked ?? false);
     if (playerRef.current) {
       playerRef.current.loadVideoById(currentSong.youtube_video_id);
     }
   }, [currentSong?.youtube_video_id, currentSong?.id]);
 
-  // Sync liked state when currentSong.liked changes (e.g. toggled on card)
   useEffect(() => {
     setLiked(currentSong?.liked ?? false);
   }, [currentSong?.liked]);
 
-  // Sync play/pause from external Zustand changes
   useEffect(() => {
     if (!playerRef.current || !currentSong) return;
     try {
@@ -120,7 +136,7 @@ export function PlayerBar() {
         playerRef.current.pauseVideo();
       }
     } catch {
-      // Player may not be ready yet
+      // player may not be ready yet
     }
   }, [isPlaying, currentSong]);
 
@@ -151,12 +167,11 @@ export function PlayerBar() {
 
   return (
     <>
-      {/* ── Floating video panel — always in DOM so audio is never interrupted ── */}
+      {/* ── Hidden YT player — always in DOM so audio never interrupts ─── */}
       <div
         className="fixed z-50 overflow-hidden rounded-2xl border border-white/15 bg-black shadow-2xl transition-all duration-300 ease-in-out"
         style={{
           width: 340,
-          // Slide in from bottom-right when visible
           bottom: showVideo && currentSong ? 88 : -400,
           right: 24,
           opacity: showVideo && currentSong ? 1 : 0,
@@ -164,6 +179,74 @@ export function PlayerBar() {
         }}
       >
         <div ref={containerRef} className="aspect-video w-full" />
+      </div>
+
+      {/* ── Queue panel — slides up above the player bar ─────────────── */}
+      <div
+        className={`fixed left-0 right-0 z-40 border-t border-white/8 bg-[#04070d]/97 backdrop-blur-2xl transition-all duration-300 ease-in-out ${
+          showQueue && currentSong ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
+        }`}
+        style={{ bottom: 72 }}
+      >
+        <div className="mx-auto max-w-2xl">
+          <div className="flex items-center justify-between px-5 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Queue · {queue.length} songs
+            </p>
+            <button
+              onClick={toggleQueue}
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-white/8 hover:text-white"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="max-h-64 overflow-y-auto pb-3">
+            {queue.map((songIndex, queueIdx) => {
+              const s = songs[songIndex];
+              if (!s) return null;
+              const isCurrent = queueIdx === currentQueuePos;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => {
+                    playAtIndex(songIndex);
+                    toggleQueue();
+                  }}
+                  className={`flex w-full items-center gap-3 px-5 py-2.5 text-left transition-colors hover:bg-white/5 ${
+                    isCurrent ? "bg-white/[0.04]" : ""
+                  }`}
+                >
+                  <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800">
+                    {s.thumbnail ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={s.thumbnail} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center">
+                        <Music size={14} className="text-slate-600" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className={`truncate text-sm font-medium ${
+                        isCurrent ? "text-cyan-300" : "text-white"
+                      }`}
+                    >
+                      {s.title}
+                    </p>
+                    <p className="truncate text-xs text-slate-500">{s.artist}</p>
+                  </div>
+                  {isCurrent && (
+                    <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-cyan-400">
+                      Playing
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       {/* ── Bottom player bar ─────────────────────────────────────────────── */}
@@ -174,17 +257,17 @@ export function PlayerBar() {
       >
         {/* Seekable progress bar */}
         <div
-          className="h-1 w-full cursor-pointer bg-white/10 hover:h-1.5 transition-all"
+          className="group/seek h-1 w-full cursor-pointer bg-white/10 transition-all hover:h-1.5"
           onClick={handleProgressClick}
         >
           <div
-            className="h-full bg-gradient-to-r from-cyan-400 to-sky-500 transition-all duration-500"
+            className="h-full bg-gradient-to-r from-cyan-400 to-sky-500 transition-[width] duration-500"
             style={{ width: `${progress}%` }}
           />
         </div>
 
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5">
-          {/* Current song info */}
+        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-2.5">
+          {/* Song info + like */}
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-slate-800">
               {currentSong?.thumbnail ? (
@@ -195,82 +278,97 @@ export function PlayerBar() {
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <div className="flex h-full w-full items-center justify-center text-lg">🎵</div>
+                <div className="flex h-full w-full items-center justify-center">
+                  <Music size={16} className="text-slate-600" />
+                </div>
               )}
             </div>
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-white leading-tight">
+              <p className="truncate text-sm font-semibold leading-tight text-white">
                 {currentSong?.title ?? "—"}
               </p>
               <p className="truncate text-xs text-slate-400">{currentSong?.artist ?? ""}</p>
             </div>
             <button
               onClick={handleLike}
-              className={`ml-1 shrink-0 text-base transition-all hover:scale-110 ${
+              title={liked ? "Unlike" : "Like"}
+              className={`ml-1 shrink-0 transition-all hover:scale-110 ${
                 liked ? "text-rose-400" : "text-slate-600 hover:text-slate-300"
               }`}
             >
-              {liked ? "❤️" : "🤍"}
+              <Heart size={16} className={liked ? "fill-rose-400" : ""} />
             </button>
           </div>
 
           {/* Playback controls */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <button
               onClick={toggleShuffle}
               title="Shuffle"
-              className={`h-8 w-8 rounded-lg text-sm transition-colors ${
+              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
                 isShuffle ? "text-cyan-400" : "text-slate-500 hover:text-white"
               }`}
             >
-              🔀
+              <Shuffle size={16} />
             </button>
             <button
               onClick={playPrev}
               title="Previous"
-              className="h-9 w-9 rounded-xl text-white hover:bg-white/10"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
-              ⏮
+              <SkipBack size={18} />
             </button>
             <button
               onClick={() => setIsPlaying(!isPlaying)}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105"
             >
-              {isPlaying ? "⏸" : "▶"}
+              {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
             </button>
             <button
               onClick={playNext}
               title="Next"
-              className="h-9 w-9 rounded-xl text-white hover:bg-white/10"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
-              ⏭
+              <SkipForward size={18} />
             </button>
             <button
               onClick={cycleRepeat}
               title={`Repeat: ${repeatMode}`}
-              className={`h-8 w-8 rounded-lg text-sm transition-colors ${
+              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
                 repeatMode !== "off" ? "text-cyan-400" : "text-slate-500 hover:text-white"
               }`}
             >
-              {repeatMode === "one" ? "🔂" : "🔁"}
+              {repeatMode === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
             </button>
           </div>
 
-          {/* Time + watch video button */}
-          <div className="flex flex-1 items-center justify-end gap-3">
+          {/* Right controls */}
+          <div className="flex flex-1 items-center justify-end gap-2">
             <span className="hidden text-xs tabular-nums text-slate-500 sm:block">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
             <button
-              onClick={toggleVideo}
-              className={`flex h-8 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition-all ${
-                showVideo
+              onClick={toggleQueue}
+              title="Queue"
+              className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+                showQueue
                   ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
-                  : "border-white/12 bg-white/5 text-slate-300 hover:bg-white/10"
+                  : "border-white/10 bg-white/5 text-slate-400 hover:text-white hover:bg-white/10"
               }`}
             >
-              {showVideo ? "🎵 Audio" : "📺 Video"}
+              <ListMusic size={15} />
+            </button>
+            <button
+              onClick={toggleVideo}
+              title={showVideo ? "Hide video" : "Show video"}
+              className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+                showVideo
+                  ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                  : "border-white/10 bg-white/5 text-slate-400 hover:text-white hover:bg-white/10"
+              }`}
+            >
+              {showVideo ? <VideoOff size={15} /> : <Video size={15} />}
             </button>
           </div>
         </div>

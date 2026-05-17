@@ -30,18 +30,21 @@ export type YoutubeSearchItem = {
 };
 
 /**
- * Strip parts of a query that commonly cause YouTube to redirect/captcha:
- * - parentheticals like (From "Movie Name")
- * - trailing qualifiers like "official audio", "official video", "lyrics"
+ * Produce a simplified retry query from the original.
+ * Strips parentheticals, brackets, pipes, qualifiers — then appends " song"
+ * for better YouTube match quality.
  */
 function simplifyQuery(query: string): string {
-  return query
-    .replace(/\s*\(from\s+"[^"]*"\)/gi, "")
-    .replace(/\s*\(from\s+'[^']*'\)/gi, "")
-    .replace(/\s+official\s+(audio|video|lyric(s)?|music\s+video)/gi, "")
-    .replace(/\s+lyrics?/gi, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+  return (
+    query
+      .replace(/\s*\([^)]*\)/gi, "")       // strip (From "Movie"), (feat. X), etc.
+      .replace(/\s*\[[^\]]*\]/gi, "")       // strip [Official Video], etc.
+      .replace(/\s*\|.*$/g, "")             // strip | Coke Studio Bharat, etc.
+      .replace(/\s+official\s+(audio|video|lyric(s)?|music\s+video)/gi, "")
+      .replace(/\s+lyrics?/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim() + " song"
+  );
 }
 
 async function runSearch(query: string): Promise<YtVideo[]> {
