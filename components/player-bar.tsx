@@ -430,13 +430,6 @@ export function PlayerBar() {
           if (dur > 0 && isFinite(dur)) {
             setProgress((cur / dur) * 100);
             setDuration(dur);
-            if ("mediaSession" in navigator) {
-              try {
-                navigator.mediaSession.setPositionState({
-                  duration: dur, playbackRate: 1, position: Math.min(cur, dur),
-                });
-              } catch { /* ignore */ }
-            }
           }
         };
         const onLoadedMetadata = () => {
@@ -548,12 +541,24 @@ export function PlayerBar() {
     if (duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const seekTime = pct * duration;
+    
     if (usingNativeAudioRef.current && audioRef.current) {
-      audioRef.current.currentTime = pct * duration;
+      audioRef.current.currentTime = seekTime;
     } else if (playerRef.current) {
-      playerRef.current.seekTo(pct * duration, true);
+      playerRef.current.seekTo(seekTime, true);
     }
     setProgress(pct * 100);
+    
+    if ("mediaSession" in navigator) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: duration,
+          playbackRate: 1,
+          position: Math.min(seekTime, duration),
+        });
+      } catch { /* ignore */ }
+    }
   }
 
   async function handleLike() {

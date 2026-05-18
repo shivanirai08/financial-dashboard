@@ -38,7 +38,7 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
   for (const instance of PIPED_INSTANCES) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+      const timeout = setTimeout(() => controller.abort(), 8000);
 
       console.log(`[audio/${videoId}] Trying Piped instance: ${instance}`);
 
@@ -49,9 +49,6 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
       clearTimeout(timeout);
 
       if (!res.ok) {
-        console.warn(
-          `[audio/${videoId}] Piped ${instance} returned ${res.status}`
-        );
         continue;
       }
 
@@ -59,13 +56,11 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
       const audioStreams = data.audioStreams;
 
       if (!audioStreams || audioStreams.length === 0) {
-        console.warn(
-          `[audio/${videoId}] Piped ${instance} has no audio streams`
-        );
         continue;
       }
 
       // Prefer m4a/mp4 audio, then sort by bitrate
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sorted = audioStreams
         .filter((s: { mimeType?: string; url?: string }) => s.url)
         .sort(
@@ -81,29 +76,71 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
         );
 
       if (sorted.length > 0 && sorted[0].url) {
-        console.log(
-          `[audio/${videoId}] Got audio from Piped ${instance}: ${sorted[0].mimeType} @ ${sorted[0].bitrate}bps`
-        );
+        console.log(`[audio/${videoId}] Got audio from Piped ${instance}`);
         return sorted[0].url;
       }
-
-      console.warn(
-        `[audio/${videoId}] Piped ${instance} returned no valid audio URLs`
-      );
     } catch (err) {
-      console.warn(
-        `[audio/${videoId}] Piped ${instance} failed:`,
-        (err as Error).message
-      );
       continue;
     }
   }
-
-  console.error(`[audio/${videoId}] All Piped instances failed`);
   return null;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getAudioFromInvidious(videoId: string): Promise<string | null> {
+  try {
+    const res = await fetch("https://api.invidious.io/instances.json", {
+      next: { revalidate: 3600 } // Cache for 1 hour
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const instances = data
+      .filter((i: any) => i[1]?.api === true)
+      .sort((a: any, b: any) => (b[1]?.monitor?.uptime || 0) - (a[1]?.monitor?.uptime || 0))
+      .map((i: any) => i[1]?.uri);
+
+    for (const instance of instances.slice(0, 5)) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+
+        console.log(`[audio/${videoId}] Trying Invidious instance: ${instance}`);
+        const vidRes = await fetch(`${instance}/api/v1/videos/${videoId}`, {
+          signal: controller.signal,
+          headers: { "User-Agent": "Mozilla/5.0" },
+        });
+        clearTimeout(timeout);
+
+        if (!vidRes.ok) continue;
+
+        const vidData = await vidRes.json();
+        const audioStreams = vidData.adaptiveFormats || vidData.formatStreams || [];
+        
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sorted = audioStreams
+          .filter((s: any) => s.type && (s.type.includes("audio/mp4") || s.type.includes("audio/webm")))
+          .sort((a: any, b: any) => {
+            const aIsMp4 = a.type.includes("mp4") ? 1 : 0;
+            const bIsMp4 = b.type.includes("mp4") ? 1 : 0;
+            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+            return (b.bitrate || 0) - (a.bitrate || 0);
+          });
+
+        if (sorted.length > 0 && sorted[0].url) {
+          console.log(`[audio/${videoId}] Got audio from Invidious ${instance}`);
+          return sorted[0].url;
+        }
+      } catch (err) {
+        continue;
+      }
+    }
+  } catch (e) {
+    console.error(`[audio/${videoId}] Invidious fallback failed`, e);
+  }
+  return null;
+}
+
 async function extractWithInnertube(
   videoId: string
 ): Promise<string | null> {
@@ -111,7 +148,7 @@ async function extractWithInnertube(
     const yt = await getInnertube();
 
     // Try clients in order of reliability
-    const clients = ["ANDROID", "IOS", "WEB"] as const;
+    const clients = ["WEB_EMBEDDED", "ANDROID", "IOS", "WEB", "TV_EMBEDDED"] as const;
 
     for (const client of clients) {
       try {
@@ -119,9 +156,6 @@ async function extractWithInnertube(
         const info = await yt.getInfo(videoId, { client });
 
         if (!info.streaming_data) {
-          console.warn(
-            `[audio/${videoId}] Innertube ${client} has no streaming_data`
-          );
           continue;
         }
 
@@ -137,9 +171,6 @@ async function extractWithInnertube(
           });
 
         if (audioFormats.length === 0) {
-          console.warn(
-            `[audio/${videoId}] Innertube ${client} has no audio formats`
-          );
           continue;
         }
 
@@ -154,14 +185,7 @@ async function extractWithInnertube(
           );
           return audioUrl;
         }
-        console.warn(
-          `[audio/${videoId}] Innertube ${client} decipher returned empty URL`
-        );
       } catch (e) {
-        console.warn(
-          `[audio/${videoId}] Innertube ${client} error:`,
-          (e as Error).message.substring(0, 100)
-        );
         continue;
       }
     }
@@ -195,12 +219,17 @@ export async function GET(
   console.log(`[audio/${videoId}] Cache miss, fetching...`);
 
   // Try Innertube first (works on residential IPs / localhost)
-  console.log(`[audio/${videoId}] Attempting Innertube extraction...`);
   let audioUrl = await extractWithInnertube(videoId);
 
-  // Fallback to Piped API (works from datacenter IPs like Vercel)
+  // Fallback to Invidious API
   if (!audioUrl) {
-    console.log(`[audio/${videoId}] Innertube failed, attempting Piped API...`);
+    console.log(`[audio/${videoId}] Innertube failed, attempting Invidious API...`);
+    audioUrl = await getAudioFromInvidious(videoId);
+  }
+
+  // Fallback to Piped API
+  if (!audioUrl) {
+    console.log(`[audio/${videoId}] Invidious failed, attempting Piped API...`);
     audioUrl = await getAudioFromPiped(videoId);
   }
 
