@@ -38,7 +38,9 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
   for (const instance of PIPED_INSTANCES) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      console.log(`[audio/${videoId}] Trying Piped instance: ${instance}`);
 
       const res = await fetch(`${instance}/streams/${videoId}`, {
         signal: controller.signal,
@@ -46,11 +48,22 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
       });
       clearTimeout(timeout);
 
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.warn(
+          `[audio/${videoId}] Piped ${instance} returned ${res.status}`
+        );
+        continue;
+      }
 
       const data = await res.json();
       const audioStreams = data.audioStreams;
-      if (!audioStreams || audioStreams.length === 0) continue;
+
+      if (!audioStreams || audioStreams.length === 0) {
+        console.warn(
+          `[audio/${videoId}] Piped ${instance} has no audio streams`
+        );
+        continue;
+      }
 
       // Prefer m4a/mp4 audio, then sort by bitrate
       const sorted = audioStreams
@@ -68,12 +81,25 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
         );
 
       if (sorted.length > 0 && sorted[0].url) {
+        console.log(
+          `[audio/${videoId}] Got audio from Piped ${instance}: ${sorted[0].mimeType} @ ${sorted[0].bitrate}bps`
+        );
         return sorted[0].url;
       }
-    } catch {
+
+      console.warn(
+        `[audio/${videoId}] Piped ${instance} returned no valid audio URLs`
+      );
+    } catch (err) {
+      console.warn(
+        `[audio/${videoId}] Piped ${instance} failed:`,
+        (err as Error).message
+      );
       continue;
     }
   }
+
+  console.error(`[audio/${videoId}] All Piped instances failed`);
   return null;
 }
 
@@ -89,8 +115,15 @@ async function extractWithInnertube(
 
     for (const client of clients) {
       try {
+        console.log(`[audio/${videoId}] Trying Innertube client: ${client}`);
         const info = await yt.getInfo(videoId, { client });
-        if (!info.streaming_data) continue;
+
+        if (!info.streaming_data) {
+          console.warn(
+            `[audio/${videoId}] Innertube ${client} has no streaming_data`
+          );
+          continue;
+        }
 
         const adaptiveFormats =
           info.streaming_data.adaptive_formats ?? [];
@@ -103,20 +136,40 @@ async function extractWithInnertube(
             return (b.bitrate ?? 0) - (a.bitrate ?? 0);
           });
 
-        if (audioFormats.length === 0) continue;
+        if (audioFormats.length === 0) {
+          console.warn(
+            `[audio/${videoId}] Innertube ${client} has no audio formats`
+          );
+          continue;
+        }
 
+        console.log(
+          `[audio/${videoId}] Innertube ${client} has ${audioFormats.length} audio formats, deciphering best...`
+        );
         const audioUrl = await audioFormats[0].decipher(yt.session.player);
-        if (audioUrl) return audioUrl;
+
+        if (audioUrl) {
+          console.log(
+            `[audio/${videoId}] Got audio URL from Innertube ${client}`
+          );
+          return audioUrl;
+        }
+        console.warn(
+          `[audio/${videoId}] Innertube ${client} decipher returned empty URL`
+        );
       } catch (e) {
         console.warn(
-          `[audio/${videoId}] Client ${client} failed:`,
-          (e as Error).message
+          `[audio/${videoId}] Innertube ${client} error:`,
+          (e as Error).message.substring(0, 100)
         );
         continue;
       }
     }
   } catch (e) {
-    console.warn(`[audio/${videoId}] Innertube failed:`, (e as Error).message);
+    console.warn(
+      `[audio/${videoId}] Innertube initialization failed:`,
+      (e as Error).message.substring(0, 100)
+    );
     innertubeInstance = null;
   }
   return null;
@@ -135,24 +188,31 @@ export async function GET(
   // Check cache first
   const cached = audioUrlCache.get(videoId);
   if (cached && cached.expires > Date.now()) {
+    console.log(`[audio/${videoId}] Cache hit`);
     return NextResponse.json({ url: cached.url });
   }
 
+  console.log(`[audio/${videoId}] Cache miss, fetching...`);
+
   // Try Innertube first (works on residential IPs / localhost)
+  console.log(`[audio/${videoId}] Attempting Innertube extraction...`);
   let audioUrl = await extractWithInnertube(videoId);
 
   // Fallback to Piped API (works from datacenter IPs like Vercel)
   if (!audioUrl) {
-    console.log(`[audio/${videoId}] Innertube failed, trying Piped...`);
+    console.log(`[audio/${videoId}] Innertube failed, attempting Piped API...`);
     audioUrl = await getAudioFromPiped(videoId);
   }
 
   if (!audioUrl) {
+    console.error(`[audio/${videoId}] All extraction methods failed`);
     return NextResponse.json(
       { error: "No streaming data available for this video" },
       { status: 404 }
     );
   }
+
+  console.log(`[audio/${videoId}] Successfully extracted audio URL`);
 
   // Cache for 5 hours
   audioUrlCache.set(videoId, {
