@@ -23,6 +23,54 @@ async function getInnertube() {
 // Simple in-memory cache for audio URLs (they last ~6 hours)
 const audioUrlCache = new Map<string, { url: string; expires: number }>();
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function extractAndReturnAudio(streamingData: any, yt: any, videoId: string) {
+  const adaptiveFormats = streamingData.adaptive_formats ?? [];
+
+  // Prefer audio formats: itag 140 (m4a 128kbps) or 251 (opus 160kbps)
+  const audioFormats = adaptiveFormats
+    .filter((f: { mime_type?: string }) => f.mime_type?.startsWith("audio/"))
+    .sort((a: { mime_type?: string; bitrate?: number }, b: { mime_type?: string; bitrate?: number }) => {
+      const aIsMp4 = a.mime_type?.includes("mp4a") ? 1 : 0;
+      const bIsMp4 = b.mime_type?.includes("mp4a") ? 1 : 0;
+      if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+      return (b.bitrate ?? 0) - (a.bitrate ?? 0);
+    });
+
+  if (audioFormats.length === 0) {
+    return NextResponse.json(
+      { error: "No audio formats available" },
+      { status: 404 }
+    );
+  }
+
+  const bestAudio = audioFormats[0];
+  const audioUrl = await bestAudio.decipher(yt.session.player);
+
+  if (!audioUrl) {
+    return NextResponse.json(
+      { error: "Could not decipher audio URL" },
+      { status: 500 }
+    );
+  }
+
+  // Cache for 5 hours (URLs are valid for ~6 hours)
+  audioUrlCache.set(videoId, {
+    url: audioUrl,
+    expires: Date.now() + 5 * 60 * 60 * 1000,
+  });
+
+  // Clean old cache entries periodically
+  if (audioUrlCache.size > 200) {
+    const now = Date.now();
+    for (const [key, val] of audioUrlCache) {
+      if (val.expires < now) audioUrlCache.delete(key);
+    }
+  }
+
+  return NextResponse.json({ url: audioUrl });
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
@@ -41,64 +89,24 @@ export async function GET(
 
   try {
     const yt = await getInnertube();
-    const info = await yt.getBasicInfo(videoId);
+    const info = await yt.getInfo(videoId, { client: "TV_EMBEDDED" });
 
     // Get adaptive formats and find best audio-only stream
     const streamingData = info.streaming_data;
     if (!streamingData) {
-      return NextResponse.json(
-        { error: "No streaming data available for this video" },
-        { status: 404 }
-      );
-    }
-
-    const adaptiveFormats = streamingData.adaptive_formats ?? [];
-
-    // Prefer audio formats: itag 140 (m4a 128kbps) or 251 (opus 160kbps)
-    // Sort: prefer m4a (wider compat) > opus, then by bitrate descending
-    const audioFormats = adaptiveFormats
-      .filter((f) => f.mime_type?.startsWith("audio/"))
-      .sort((a, b) => {
-        // Prefer mp4a (m4a) over webm/opus for broader device compatibility
-        const aIsMp4 = a.mime_type?.includes("mp4a") ? 1 : 0;
-        const bIsMp4 = b.mime_type?.includes("mp4a") ? 1 : 0;
-        if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-        // Then by bitrate
-        return (b.bitrate ?? 0) - (a.bitrate ?? 0);
-      });
-
-    if (audioFormats.length === 0) {
-      return NextResponse.json(
-        { error: "No audio formats available" },
-        { status: 404 }
-      );
-    }
-
-    const bestAudio = audioFormats[0];
-    const audioUrl = await bestAudio.decipher(yt.session.player);
-
-    if (!audioUrl) {
-      return NextResponse.json(
-        { error: "Could not decipher audio URL" },
-        { status: 500 }
-      );
-    }
-
-    // Cache for 5 hours (URLs are valid for ~6 hours)
-    audioUrlCache.set(videoId, {
-      url: audioUrl,
-      expires: Date.now() + 5 * 60 * 60 * 1000,
-    });
-
-    // Clean old cache entries periodically
-    if (audioUrlCache.size > 200) {
-      const now = Date.now();
-      for (const [key, val] of audioUrlCache) {
-        if (val.expires < now) audioUrlCache.delete(key);
+      // Retry with WEB client
+      const info2 = await yt.getInfo(videoId, { client: "WEB" });
+      const sd2 = info2.streaming_data;
+      if (!sd2) {
+        return NextResponse.json(
+          { error: "No streaming data available for this video" },
+          { status: 404 }
+        );
       }
+      return extractAndReturnAudio(sd2, yt, videoId);
     }
 
-    return NextResponse.json({ url: audioUrl });
+    return extractAndReturnAudio(streamingData, yt, videoId);
   } catch (error) {
     console.error(`[api/youtube/audio/${videoId}] Error:`, error);
 
