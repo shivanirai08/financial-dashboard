@@ -57,6 +57,7 @@ export function PlayerBar() {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const silentAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
   // Position is stored as { right, bottom } offsets from viewport edges
@@ -181,32 +182,56 @@ export function PlayerBar() {
     }
   }, []);
 
-  // ── Web Audio API silent keepalive ─────────────────────────────────────
-  // Keeps the browser audio session alive so YouTube iframe isn't suspended
-  // when the screen locks on Android Chrome PWA.
+  // ── Audio session keepalive ─────────────────────────────────────────────
+  // Uses BOTH a Web Audio API oscillator AND a silent <audio> element loop
+  // to anchor the media session on Android Chrome. The <audio> element is
+  // critical: Android only shows lock-screen controls and allows background
+  // playback when an <audio>/<video> element is actively playing.
   const startAudioKeepalive = useCallback(() => {
     if (typeof window === "undefined") return;
+
+    // 1. Web Audio oscillator (keeps AudioContext from suspending)
     try {
       const AudioContextClass =
         window.AudioContext ||
         (window as Window & { webkitAudioContext?: typeof AudioContext })
           .webkitAudioContext;
-      if (!AudioContextClass) return;
-
-      if (!audioCtxRef.current) {
-        const ctx = new AudioContextClass();
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0.00001; // effectively silent
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
-        oscillator.start();
-        audioCtxRef.current = ctx;
-      } else if (audioCtxRef.current.state === "suspended") {
-        audioCtxRef.current.resume().catch(() => {});
+      if (AudioContextClass) {
+        if (!audioCtxRef.current) {
+          const ctx = new AudioContextClass();
+          const oscillator = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0.00001; // effectively silent
+          oscillator.connect(gain);
+          gain.connect(ctx.destination);
+          oscillator.start();
+          audioCtxRef.current = ctx;
+        } else if (audioCtxRef.current.state === "suspended") {
+          audioCtxRef.current.resume().catch(() => {});
+        }
       }
     } catch {
       // Unsupported or blocked.
+    }
+
+    // 2. Silent <audio> element loop — anchors the Android media session
+    try {
+      if (!silentAudioRef.current) {
+        const audio = new Audio("/silence.wav");
+        audio.loop = true;
+        audio.volume = 0.01; // near-silent but not 0 (some browsers ignore volume=0)
+        // Prevent this element from taking over MediaSession metadata
+        (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
+        silentAudioRef.current = audio;
+      }
+      const a = silentAudioRef.current;
+      if (a.paused) {
+        a.play().catch(() => {
+          // Will be retried on next user gesture via primeOnGesture
+        });
+      }
+    } catch {
+      // ignore
     }
   }, []);
 
@@ -214,6 +239,13 @@ export function PlayerBar() {
     try {
       if (audioCtxRef.current?.state === "running") {
         audioCtxRef.current.suspend().catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (silentAudioRef.current && !silentAudioRef.current.paused) {
+        silentAudioRef.current.pause();
       }
     } catch {
       // ignore
@@ -256,6 +288,10 @@ export function PlayerBar() {
         // Resume Web Audio keepalive if OS suspended it during screen lock
         if (audioCtxRef.current?.state === "suspended") {
           audioCtxRef.current.resume().catch(() => {});
+        }
+        // Resume silent audio if it got paused by the OS
+        if (silentAudioRef.current?.paused && usePlayerStore.getState().isPlaying) {
+          silentAudioRef.current.play().catch(() => {});
         }
       }
     }
@@ -303,30 +339,40 @@ export function PlayerBar() {
         // ignore
       }
       audioCtxRef.current = null;
+      try {
+        if (silentAudioRef.current) {
+          silentAudioRef.current.pause();
+          silentAudioRef.current.src = "";
+        }
+      } catch {
+        // ignore
+      }
+      silentAudioRef.current = null;
     };
   }, [releaseWakeLock]);
 
-  // ── Prime AudioContext on first user gesture (required by Android Chrome) ──
-  // An AudioContext created outside a gesture (e.g. in a useEffect) starts
-  // suspended on Android. By calling startAudioKeepalive() inside the FIRST
-  // tap/click anywhere on the page, the context is created (or resumed) while
-  // the browser is inside a gesture — so it runs immediately with no extra
-  // user action needed, and stays alive when the screen locks.
+  // ── Prime AudioContext + silent audio on first user gesture ──────────────
+  // On Android Chrome, both AudioContext and <audio>.play() MUST be initiated
+  // inside a user gesture. We prime them on the very first tap/click so that
+  // subsequent programmatic calls (e.g. auto-advance while screen is off) work.
   useEffect(() => {
     let primed = false;
     function primeOnGesture() {
-      // Always call startAudioKeepalive inside the gesture so the context is
-      // created/resumed with full permission. Once primed we still keep the
-      // listener alive (cheap) to handle resume-after-suspension on unlock.
       startAudioKeepalive();
+      // Also resume silent audio if it was paused/blocked
+      if (silentAudioRef.current?.paused) {
+        silentAudioRef.current.play().catch(() => {});
+      }
       if (!primed) {
         primed = true;
-        // After first prime, switch to a lightweight listener that only resumes.
         document.removeEventListener("click", primeOnGesture);
         document.removeEventListener("touchstart", primeOnGesture);
         function resumeOnGesture() {
           if (audioCtxRef.current?.state === "suspended") {
             audioCtxRef.current.resume().catch(() => {});
+          }
+          if (silentAudioRef.current?.paused && usePlayerStore.getState().isPlaying) {
+            silentAudioRef.current.play().catch(() => {});
           }
         }
         document.addEventListener("click", resumeOnGesture, { passive: true });
@@ -397,6 +443,11 @@ export function PlayerBar() {
               intervalRef.current = null;
             }
             setProgress(0);
+            // Ensure silent audio stays playing to preserve the media session
+            // across song transitions (critical for Android background playback)
+            if (silentAudioRef.current?.paused) {
+              silentAudioRef.current.play().catch(() => {});
+            }
             playNextRef.current();
           }
         },
@@ -510,20 +561,49 @@ export function PlayerBar() {
       }
 
       // If the screen is off, autoplay may be silently blocked after loading.
-      // Schedule a retry: if the player isn't playing 2.5 s after load, kick it.
+      // Schedule multiple retries: if the player isn't playing, keep trying.
       if (document.hidden && usePlayerStore.getState().isPlaying) {
-        retryTimeoutRef.current = setTimeout(() => {
-          retryTimeoutRef.current = null;
-          isLoadingVideoRef.current = false;
-          if (!usePlayerStore.getState().isPlaying) return;
-          const p = playerRef.current;
-          if (!p) return;
-          const state = p.getPlayerState?.();
-          // state 1 = playing, 3 = buffering — both are fine; anything else: retry
-          if (state !== 1 && state !== 3) {
-            try { p.playVideo(); } catch { /* ignore */ }
-          }
-        }, 2500);
+        let retryCount = 0;
+        const maxRetries = 5;
+        const scheduleRetry = () => {
+          // Increasing delays: 1.5s, 2.5s, 3.5s, 5s, 7s
+          const delay = [1500, 2500, 3500, 5000, 7000][retryCount] ?? 5000;
+          retryTimeoutRef.current = setTimeout(() => {
+            retryTimeoutRef.current = null;
+            isLoadingVideoRef.current = false;
+            if (!usePlayerStore.getState().isPlaying) return;
+            const p = playerRef.current;
+            if (!p) return;
+            const state = p.getPlayerState?.();
+            // state 1 = playing, 3 = buffering — both are fine
+            if (state !== 1 && state !== 3) {
+              try { p.playVideo(); } catch { /* ignore */ }
+              // Re-assert media session so lock-screen controls stay
+              if ("mediaSession" in navigator && currentSong) {
+                try {
+                  navigator.mediaSession.metadata = new MediaMetadata({
+                    title: currentSong.title,
+                    artist: currentSong.artist,
+                    album: "Pulsebox",
+                    artwork: currentSong.thumbnail
+                      ? [
+                          { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
+                          { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
+                          { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
+                        ]
+                      : [],
+                  });
+                  navigator.mediaSession.playbackState = "playing";
+                } catch { /* ignore */ }
+              }
+              retryCount++;
+              if (retryCount < maxRetries) {
+                scheduleRetry();
+              }
+            }
+          }, delay);
+        };
+        scheduleRetry();
       }
     }
   }, [currentSong?.youtube_video_id, currentSong?.id]);
