@@ -34,7 +34,7 @@ export function SongCard({ song, index }: SongCardProps) {
     (s) => s.songs.find((s2) => s2.id === song.id)?.youtube_video_id ?? song.youtube_video_id
   );
   const hasVideo = Boolean(storeVideo);
-  const mobileTitle = song.title.length > 34 ? `${song.title.slice(0, 31)}...` : song.title;
+  const mobileTitle = song.title.length > 28 ? `${song.title.slice(0, 25)}...` : song.title;
 
   // Close menu on outside click
   useEffect(() => {
@@ -113,7 +113,7 @@ export function SongCard({ song, index }: SongCardProps) {
     <>
       <article
         onClick={handlePlay}
-        className={`group relative flex w-full max-w-full cursor-pointer items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
+        className={`group relative grid w-full max-w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
             : removing
@@ -122,7 +122,7 @@ export function SongCard({ song, index }: SongCardProps) {
         } ${!hasVideo ? "cursor-default" : ""}`}
       >
         {/* Thumbnail / Placeholder */}
-        <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl bg-slate-800 sm:h-14 sm:w-14">
+        <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-xl bg-slate-800 sm:h-14 sm:w-14">
           {song.thumbnail ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -153,7 +153,7 @@ export function SongCard({ song, index }: SongCardProps) {
         </div>
 
         {/* Info */}
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 w-full">
           <p
             className={`truncate text-[13px] font-semibold leading-snug sm:text-sm ${
               isActive ? "text-cyan-300" : "text-white"
@@ -162,7 +162,7 @@ export function SongCard({ song, index }: SongCardProps) {
             <span className="sm:hidden">{mobileTitle}</span>
             <span className="hidden sm:inline">{song.title}</span>
           </p>
-          <p className="mt-0.5 truncate text-[11px] text-slate-400 sm:text-xs">{song.artist}</p>
+          <p className="mt-0.5 truncate text-[10px] text-slate-400 sm:text-xs">{song.artist}</p>
           {!hasVideo && (
             <p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-rose-400/70">
               No YouTube match
@@ -171,7 +171,7 @@ export function SongCard({ song, index }: SongCardProps) {
         </div>
 
         {/* Right-side actions */}
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
           {/* On mobile always show; on desktop show on hover */}
           <div className="flex items-center gap-1 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
             {hasVideo && (
@@ -186,13 +186,13 @@ export function SongCard({ song, index }: SongCardProps) {
             <button
               onClick={handleLike}
               title={liked ? "Unlike" : "Like"}
-              className={`flex h-7 w-7 items-center justify-center rounded-lg border transition-all sm:h-8 sm:w-8 ${
+              className={`flex h-6 w-6 items-center justify-center rounded-lg border transition-all sm:h-8 sm:w-8 ${
                 liked
                   ? "border-rose-400/40 bg-rose-400/10 text-rose-400"
                   : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/12 hover:text-white"
               }`}
             >
-              <Heart size={14} className={liked ? "fill-rose-400" : ""} />
+              <Heart size={12} className={liked ? "fill-rose-400" : ""} />
             </button>
           </div>
 
@@ -201,9 +201,9 @@ export function SongCard({ song, index }: SongCardProps) {
             <button
               onClick={handleOpenActions}
               title="More options"
-              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
+              className="flex h-6 w-6 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
             >
-              <MoreVertical size={15} />
+              <MoreVertical size={13} />
             </button>
 
             {/* Dropdown */}
