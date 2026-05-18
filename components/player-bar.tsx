@@ -151,6 +151,10 @@ export function PlayerBar() {
   playNextRef.current = playNext;
   // True while the tab is hidden — we block pause to keep audio going
   const tabHiddenRef = useRef(false);
+  // True while loadVideoById is in progress — avoids premature force-resume
+  const isLoadingVideoRef = useRef(false);
+  // Retry timeout for auto-advance while screen is off
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -289,6 +293,10 @@ export function PlayerBar() {
   useEffect(() => {
     return () => {
       void releaseWakeLock();
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
+      }
       try {
         audioCtxRef.current?.close();
       } catch {
@@ -297,6 +305,41 @@ export function PlayerBar() {
       audioCtxRef.current = null;
     };
   }, [releaseWakeLock]);
+
+  // ── Prime AudioContext on first user gesture (required by Android Chrome) ──
+  // An AudioContext created outside a gesture (e.g. in a useEffect) starts
+  // suspended on Android. By calling startAudioKeepalive() inside the FIRST
+  // tap/click anywhere on the page, the context is created (or resumed) while
+  // the browser is inside a gesture — so it runs immediately with no extra
+  // user action needed, and stays alive when the screen locks.
+  useEffect(() => {
+    let primed = false;
+    function primeOnGesture() {
+      // Always call startAudioKeepalive inside the gesture so the context is
+      // created/resumed with full permission. Once primed we still keep the
+      // listener alive (cheap) to handle resume-after-suspension on unlock.
+      startAudioKeepalive();
+      if (!primed) {
+        primed = true;
+        // After first prime, switch to a lightweight listener that only resumes.
+        document.removeEventListener("click", primeOnGesture);
+        document.removeEventListener("touchstart", primeOnGesture);
+        function resumeOnGesture() {
+          if (audioCtxRef.current?.state === "suspended") {
+            audioCtxRef.current.resume().catch(() => {});
+          }
+        }
+        document.addEventListener("click", resumeOnGesture, { passive: true });
+        document.addEventListener("touchstart", resumeOnGesture, { passive: true });
+      }
+    }
+    document.addEventListener("click", primeOnGesture, { passive: true });
+    document.addEventListener("touchstart", primeOnGesture, { passive: true });
+    return () => {
+      document.removeEventListener("click", primeOnGesture);
+      document.removeEventListener("touchstart", primeOnGesture);
+    };
+  }, [startAudioKeepalive]);
 
   // ── YouTube IFrame API bootstrap ──────────────────────────────────────────
   const initPlayer = useCallback(() => {
@@ -308,7 +351,13 @@ export function PlayerBar() {
       events: {
         onStateChange(event) {
           if (event.data === 1) {
+            isLoadingVideoRef.current = false;
             setIsPlaying(true);
+            // Explicitly tell the lock screen we are playing — critical for
+            // auto-advanced songs where playbackState may still be "paused"
+            if ("mediaSession" in navigator) {
+              try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
+            }
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
                 const p = playerRef.current;
@@ -336,8 +385,10 @@ export function PlayerBar() {
             // (hidden tab browsers silently pause YouTube — we ignore it)
             if (!tabHiddenRef.current) {
               setIsPlaying(false);
-            } else {
-              // Tab is hidden — force resume immediately
+            } else if (!isLoadingVideoRef.current) {
+              // Tab is hidden and NOT in the middle of loading a new video —
+              // force resume. (Calling playVideo during loadVideoById can confuse
+              // the player and cause the second song to stop.)
               try { playerRef.current?.playVideo(); } catch { /* ignore */ }
             }
           } else if (event.data === 0) {
@@ -436,7 +487,44 @@ export function PlayerBar() {
     setDuration(0);
     setLiked(currentSong.liked ?? false);
     if (playerRef.current) {
+      // Mark loading so the state-2 handler doesn't fire playVideo prematurely
+      isLoadingVideoRef.current = true;
+
+      // Clear any pending retry from a previous transition
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
+      }
+
       playerRef.current.loadVideoById(currentSong.youtube_video_id);
+
+      // Reset MediaSession position for the new track immediately
+      if ("mediaSession" in navigator) {
+        try {
+          navigator.mediaSession.setPositionState({ duration: 0, playbackRate: 1, position: 0 });
+        } catch { /* ignore */ }
+        // While hidden the playbackState might still read "paused" — set it now
+        if (usePlayerStore.getState().isPlaying) {
+          try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
+        }
+      }
+
+      // If the screen is off, autoplay may be silently blocked after loading.
+      // Schedule a retry: if the player isn't playing 2.5 s after load, kick it.
+      if (document.hidden && usePlayerStore.getState().isPlaying) {
+        retryTimeoutRef.current = setTimeout(() => {
+          retryTimeoutRef.current = null;
+          isLoadingVideoRef.current = false;
+          if (!usePlayerStore.getState().isPlaying) return;
+          const p = playerRef.current;
+          if (!p) return;
+          const state = p.getPlayerState?.();
+          // state 1 = playing, 3 = buffering — both are fine; anything else: retry
+          if (state !== 1 && state !== 3) {
+            try { p.playVideo(); } catch { /* ignore */ }
+          }
+        }, 2500);
+      }
     }
   }, [currentSong?.youtube_video_id, currentSong?.id]);
 
@@ -583,7 +671,10 @@ export function PlayerBar() {
               <SkipBack size={30} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={() => {
+                if (!isPlaying) startAudioKeepalive();
+                setIsPlaying(!isPlaying);
+              }}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
               {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
@@ -831,7 +922,12 @@ export function PlayerBar() {
               <SkipBack size={18} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={() => {
+                // Ensure AudioContext is resumed in this user gesture context
+                // (Android Chrome: AudioContext created outside a gesture is suspended)
+                if (!isPlaying) startAudioKeepalive();
+                setIsPlaying(!isPlaying);
+              }}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
