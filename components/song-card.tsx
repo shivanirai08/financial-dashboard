@@ -113,7 +113,7 @@ export function SongCard({ song, index }: SongCardProps) {
     <>
       <article
         onClick={handlePlay}
-        className={`group relative grid w-full max-w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
+        className={`group relative grid w-full max-w-full grid-cols-[auto_minmax(0,1fr)_44px] items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-3 sm:p-3 ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
             : removing
@@ -171,9 +171,9 @@ export function SongCard({ song, index }: SongCardProps) {
         </div>
 
         {/* Right-side actions */}
-        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+        <div className="flex w-11 shrink-0 items-center justify-end gap-0.5 sm:w-auto sm:gap-1">
           {/* On mobile always show; on desktop show on hover */}
-          <div className="flex items-center gap-1 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+          <div className="hidden items-center gap-1 sm:flex sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
             {hasVideo && (
               <button
                 onClick={handleWatchVideo}
@@ -201,9 +201,9 @@ export function SongCard({ song, index }: SongCardProps) {
             <button
               onClick={handleOpenActions}
               title="More options"
-              className="flex h-6 w-6 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
             >
-              <MoreVertical size={13} />
+              <MoreVertical size={15} />
             </button>
 
             {/* Dropdown */}

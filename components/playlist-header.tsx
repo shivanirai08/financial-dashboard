@@ -72,38 +72,39 @@ export function PlaylistHeader({ playlist, songs }: Props) {
 
   return (
     <>
-      <section className="rounded-2xl border border-white/8 bg-white/[0.04] p-4 backdrop-blur-xl sm:rounded-[2rem] sm:p-7">
+      <section className="rounded-2xl border border-white/8 bg-white/[0.04] p-3 backdrop-blur-xl sm:rounded-[2rem] sm:p-7">
         {/* Back + actions row */}
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-1.5 sm:mb-4 sm:gap-2">
           <button
             onClick={() => router.back()}
-            className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition-all hover:bg-white/10 hover:text-white"
+            className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-slate-300 transition-all hover:bg-white/10 hover:text-white sm:px-3 sm:py-2 sm:text-sm"
           >
             <ArrowLeft size={15} />
             Back
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             {!confirmDelete ? (
               <>
                 <button
                   onClick={() => setShowAddSong(true)}
-                  className="flex items-center gap-1.5 rounded-xl border border-cyan-400/25 bg-cyan-400/8 px-3 py-2 text-sm text-cyan-300 transition-all hover:bg-cyan-400/15"
+                  className="flex items-center gap-1.5 rounded-xl border border-cyan-400/25 bg-cyan-400/8 px-2.5 py-1.5 text-xs text-cyan-300 transition-all hover:bg-cyan-400/15 sm:px-3 sm:py-2 sm:text-sm"
                 >
                   <Plus size={14} />
-                  Add song
+                  <span className="sm:hidden">Add</span>
+                  <span className="hidden sm:inline">Add song</span>
                 </button>
                 <button
                   onClick={() => setConfirmDelete(true)}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-400 transition-all hover:border-rose-400/30 hover:bg-rose-400/8 hover:text-rose-400"
+                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-400 transition-all hover:border-rose-400/30 hover:bg-rose-400/8 hover:text-rose-400 sm:h-9 sm:w-9"
                   title="Delete playlist"
                 >
                   <Trash2 size={15} />
                 </button>
               </>
             ) : (
-              <div className="flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-400/8 px-3 py-2">
-                <span className="text-sm text-rose-300">Delete playlist?</span>
+              <div className="flex items-center gap-1.5 rounded-xl border border-rose-400/30 bg-rose-400/8 px-2.5 py-1.5 sm:gap-2 sm:px-3 sm:py-2">
+                <span className="text-xs text-rose-300 sm:text-sm">Delete?</span>
                 <button
                   onClick={handleDelete}
                   disabled={deleting}
@@ -124,7 +125,7 @@ export function PlaylistHeader({ playlist, songs }: Props) {
         </div>
 
         {/* Playlist kicker */}
-        <p className="text-xs uppercase tracking-[0.24em] text-slate-400">Playlist</p>
+        <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 sm:text-xs sm:tracking-[0.24em]">Playlist</p>
 
         {/* Editable name */}
         {editing ? (
@@ -140,12 +141,12 @@ export function PlaylistHeader({ playlist, songs }: Props) {
                 }
               }}
               autoFocus
-              className="flex-1 rounded-xl border border-cyan-400/40 bg-white/5 px-3 py-2 text-lg font-bold text-white outline-none sm:text-2xl"
+              className="flex-1 rounded-xl border border-cyan-400/40 bg-white/5 px-3 py-2 text-base font-bold text-white outline-none sm:text-2xl"
             />
             <button
               onClick={handleRename}
               disabled={renaming}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-white disabled:opacity-50"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-white disabled:opacity-50 sm:h-10 sm:w-10"
             >
               {renaming ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
             </button>
@@ -154,19 +155,19 @@ export function PlaylistHeader({ playlist, songs }: Props) {
                 setEditing(false);
                 setNameInput(playlist.name);
               }}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/15 text-slate-400 hover:text-white"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/15 text-slate-400 hover:text-white sm:h-10 sm:w-10"
             >
               <X size={16} />
             </button>
           </div>
         ) : (
           <div className="mt-2 flex items-start gap-3">
-            <h1 className="flex-1 truncate text-xl font-bold tracking-tight text-white sm:text-3xl">
+            <h1 className="flex-1 truncate text-lg font-bold tracking-tight text-white sm:text-3xl">
               {playlist.name}
             </h1>
             <button
               onClick={() => setEditing(true)}
-              className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-white/8 hover:text-white"
+              className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-white/8 hover:text-white sm:mt-1 sm:h-8 sm:w-8"
               title="Rename playlist"
             >
               <Pencil size={15} />
@@ -175,15 +176,15 @@ export function PlaylistHeader({ playlist, songs }: Props) {
         )}
 
         {/* Meta info */}
-        <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-slate-400">
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400 sm:mt-4 sm:gap-4 sm:text-sm">
           <span>{songs.length} songs</span>
-          <span className="h-1 w-1 rounded-full bg-slate-600" />
+          <span className="hidden h-1 w-1 rounded-full bg-slate-600 sm:inline-flex" />
           <span>{matchedCount} matched on YouTube</span>
-          <span className="h-1 w-1 rounded-full bg-slate-600" />
+          <span className="hidden h-1 w-1 rounded-full bg-slate-600 sm:inline-flex" />
           <span>{new Date(playlist.created_at).toLocaleDateString()}</span>
         </div>
 
-        <p className="mt-3 text-xs text-slate-500">
+        <p className="mt-2 text-[11px] text-slate-500 sm:mt-3 sm:text-xs">
           Click any song to play. Use the bar at the bottom to control playback.
         </p>
       </section>
