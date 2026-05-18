@@ -89,21 +89,29 @@ export async function GET(
 
   try {
     const yt = await getInnertube();
-    const info = await yt.getInfo(videoId, { client: "TV_EMBEDDED" });
 
-    // Get adaptive formats and find best audio-only stream
-    const streamingData = info.streaming_data;
-    if (!streamingData) {
-      // Retry with WEB client
-      const info2 = await yt.getInfo(videoId, { client: "WEB" });
-      const sd2 = info2.streaming_data;
-      if (!sd2) {
-        return NextResponse.json(
-          { error: "No streaming data available for this video" },
-          { status: 404 }
-        );
+    // Try clients in order of reliability for audio streaming
+    const clients = ["ANDROID", "IOS", "WEB"] as const;
+    let streamingData = null;
+
+    for (const client of clients) {
+      try {
+        const info = await yt.getInfo(videoId, { client });
+        if (info.streaming_data) {
+          streamingData = info.streaming_data;
+          break;
+        }
+      } catch (e) {
+        console.warn(`[audio/${videoId}] Client ${client} failed:`, (e as Error).message);
+        continue;
       }
-      return extractAndReturnAudio(sd2, yt, videoId);
+    }
+
+    if (!streamingData) {
+      return NextResponse.json(
+        { error: "No streaming data available for this video" },
+        { status: 404 }
+      );
     }
 
     return extractAndReturnAudio(streamingData, yt, videoId);
