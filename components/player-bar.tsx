@@ -56,8 +56,10 @@ export function PlayerBar() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const silentAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Native <audio> element — primary playback method (supports background playback)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Whether we're using native audio (true) or YouTube iframe fallback (false)
+  const usingNativeAudioRef = useRef(false);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
   // Position is stored as { right, bottom } offsets from viewport edges
@@ -150,116 +152,44 @@ export function PlayerBar() {
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const playNextRef = useRef(playNext);
   playNextRef.current = playNext;
-  // True while the tab is hidden — we block pause to keep audio going
+  // True while the tab is hidden
   const tabHiddenRef = useRef(false);
-  // True while loadVideoById is in progress — avoids premature force-resume
+  // True while loadVideoById is in progress
   const isLoadingVideoRef = useRef(false);
-  // Retry timeout for auto-advance while screen is off
-  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
+  // Track if audio URL fetch is in progress
+  const audioLoadingRef = useRef(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  const forceResumeIfNeeded = useCallback(() => {
-    const p = playerRef.current;
-    if (!p) return;
-
-    const shouldPlay = usePlayerStore.getState().isPlaying;
-    if (!shouldPlay) return;
-
-    const state = p.getPlayerState?.();
-    if (state === 2 || state === -1) {
-      try {
-        p.playVideo();
-      } catch {
-        // Browser media policies can block this; ignore and retry on next visibility/focus.
-      }
-    }
-  }, []);
-
-  // ── Audio session keepalive ─────────────────────────────────────────────
-  // Uses BOTH a Web Audio API oscillator AND a silent <audio> element loop
-  // to anchor the media session on Android Chrome. The <audio> element is
-  // critical: Android only shows lock-screen controls and allows background
-  // playback when an <audio>/<video> element is actively playing.
-  const startAudioKeepalive = useCallback(() => {
+  // ── Create the native <audio> element once ────────────────────────────────
+  useEffect(() => {
     if (typeof window === "undefined") return;
-
-    // 1. Web Audio oscillator (keeps AudioContext from suspending)
-    try {
-      const AudioContextClass =
-        window.AudioContext ||
-        (window as Window & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-      if (AudioContextClass) {
-        if (!audioCtxRef.current) {
-          const ctx = new AudioContextClass();
-          const oscillator = ctx.createOscillator();
-          const gain = ctx.createGain();
-          gain.gain.value = 0.00001; // effectively silent
-          oscillator.connect(gain);
-          gain.connect(ctx.destination);
-          oscillator.start();
-          audioCtxRef.current = ctx;
-        } else if (audioCtxRef.current.state === "suspended") {
-          audioCtxRef.current.resume().catch(() => {});
-        }
-      }
-    } catch {
-      // Unsupported or blocked.
+    if (!audioRef.current) {
+      const audio = new Audio();
+      audio.preload = "auto";
+      audioRef.current = audio;
     }
-
-    // 2. Silent <audio> element loop — anchors the Android media session
-    try {
-      if (!silentAudioRef.current) {
-        const audio = new Audio("/silence.wav");
-        audio.loop = true;
-        audio.volume = 0.01; // near-silent but not 0 (some browsers ignore volume=0)
-        // Prevent this element from taking over MediaSession metadata
-        (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
-        silentAudioRef.current = audio;
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+        audioRef.current = null;
       }
-      const a = silentAudioRef.current;
-      if (a.paused) {
-        a.play().catch(() => {
-          // Will be retried on next user gesture via primeOnGesture
-        });
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const stopAudioKeepalive = useCallback(() => {
-    try {
-      if (audioCtxRef.current?.state === "running") {
-        audioCtxRef.current.suspend().catch(() => {});
-      }
-    } catch {
-      // ignore
-    }
-    try {
-      if (silentAudioRef.current && !silentAudioRef.current.paused) {
-        silentAudioRef.current.pause();
-      }
-    } catch {
-      // ignore
-    }
+    };
   }, []);
 
   const requestWakeLock = useCallback(async () => {
     if (typeof window === "undefined" || document.hidden) return;
-
     const nav = navigator as Navigator & {
       wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> };
     };
     if (!nav.wakeLock) return;
-
     try {
       wakeLockRef.current = await nav.wakeLock.request("screen");
     } catch {
@@ -271,136 +201,54 @@ export function PlayerBar() {
     if (!wakeLockRef.current) return;
     try {
       await wakeLockRef.current.release();
-    } catch {
-      // ignore
-    } finally {
-      wakeLockRef.current = null;
-    }
+    } catch { /* ignore */ }
+    finally { wakeLockRef.current = null; }
   }, []);
 
-  // ── Block pause when tab is hidden / screen locked ────────────────────────
+  // ── Visibility change: re-acquire wake lock when returning ─────────────
   useEffect(() => {
     function handleVisibility() {
       tabHiddenRef.current = document.hidden;
       if (!document.hidden) {
-        forceResumeIfNeeded();
         void requestWakeLock();
-        // Resume Web Audio keepalive if OS suspended it during screen lock
-        if (audioCtxRef.current?.state === "suspended") {
-          audioCtxRef.current.resume().catch(() => {});
-        }
-        // Resume silent audio if it got paused by the OS
-        if (silentAudioRef.current?.paused && usePlayerStore.getState().isPlaying) {
-          silentAudioRef.current.play().catch(() => {});
-        }
       }
     }
-
-    function handlePageShow() {
-      forceResumeIfNeeded();
-      void requestWakeLock();
-    }
-
-    function handleFocus() {
-      forceResumeIfNeeded();
-    }
-
     document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("pageshow", handlePageShow);
-    window.addEventListener("focus", handleFocus);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("pageshow", handlePageShow);
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [forceResumeIfNeeded, requestWakeLock]);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [requestWakeLock]);
 
   useEffect(() => {
     if (!mounted) return;
     if (isPlaying && currentSong) {
       void requestWakeLock();
-      startAudioKeepalive();
     } else {
       void releaseWakeLock();
-      stopAudioKeepalive();
     }
-  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock, startAudioKeepalive, stopAudioKeepalive]);
+  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock]);
 
   useEffect(() => {
-    return () => {
-      void releaseWakeLock();
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = null;
-      }
-      try {
-        audioCtxRef.current?.close();
-      } catch {
-        // ignore
-      }
-      audioCtxRef.current = null;
-      try {
-        if (silentAudioRef.current) {
-          silentAudioRef.current.pause();
-          silentAudioRef.current.src = "";
-        }
-      } catch {
-        // ignore
-      }
-      silentAudioRef.current = null;
-    };
+    return () => { void releaseWakeLock(); };
   }, [releaseWakeLock]);
 
-  // ── Prime AudioContext + silent audio on first user gesture ──────────────
-  // On Android Chrome, both AudioContext and <audio>.play() MUST be initiated
-  // inside a user gesture. We prime them on the very first tap/click so that
-  // subsequent programmatic calls (e.g. auto-advance while screen is off) work.
-  useEffect(() => {
-    let primed = false;
-    function primeOnGesture() {
-      startAudioKeepalive();
-      // Also resume silent audio if it was paused/blocked
-      if (silentAudioRef.current?.paused) {
-        silentAudioRef.current.play().catch(() => {});
-      }
-      if (!primed) {
-        primed = true;
-        document.removeEventListener("click", primeOnGesture);
-        document.removeEventListener("touchstart", primeOnGesture);
-        function resumeOnGesture() {
-          if (audioCtxRef.current?.state === "suspended") {
-            audioCtxRef.current.resume().catch(() => {});
-          }
-          if (silentAudioRef.current?.paused && usePlayerStore.getState().isPlaying) {
-            silentAudioRef.current.play().catch(() => {});
-          }
-        }
-        document.addEventListener("click", resumeOnGesture, { passive: true });
-        document.addEventListener("touchstart", resumeOnGesture, { passive: true });
-      }
-    }
-    document.addEventListener("click", primeOnGesture, { passive: true });
-    document.addEventListener("touchstart", primeOnGesture, { passive: true });
-    return () => {
-      document.removeEventListener("click", primeOnGesture);
-      document.removeEventListener("touchstart", primeOnGesture);
-    };
-  }, [startAudioKeepalive]);
-
-  // ── YouTube IFrame API bootstrap ──────────────────────────────────────────
+  // ── YouTube IFrame API bootstrap (for video display only) ──────────────
   const initPlayer = useCallback(() => {
     if (!containerRef.current || playerRef.current) return;
 
     playerRef.current = new window.YT.Player(containerRef.current, {
       videoId: "",
-      playerVars: { autoplay: 1, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
+      playerVars: { autoplay: 0, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
       events: {
         onStateChange(event) {
+          // When using native audio, iframe is visual-only — sync it
+          if (usingNativeAudioRef.current) {
+            // Mute the iframe so we don't get double audio
+            try { (playerRef.current as unknown as { mute: () => void })?.mute(); } catch { /* ignore */ }
+            return;
+          }
+          // Fallback mode: iframe handles audio
           if (event.data === 1) {
             isLoadingVideoRef.current = false;
             setIsPlaying(true);
-            // Explicitly tell the lock screen we are playing — critical for
-            // auto-advanced songs where playbackState may still be "paused"
             if ("mediaSession" in navigator) {
               try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
             }
@@ -412,42 +260,20 @@ export function PlayerBar() {
                 const dur = p.getDuration?.() ?? 0;
                 setProgress(dur > 0 ? (cur / dur) * 100 : 0);
                 setDuration(dur);
-                // Keep lock-screen scrubber in sync
                 if ("mediaSession" in navigator && dur > 0) {
                   try {
                     navigator.mediaSession.setPositionState({
-                      duration: dur,
-                      playbackRate: 1,
-                      position: Math.min(cur, dur),
+                      duration: dur, playbackRate: 1, position: Math.min(cur, dur),
                     });
-                  } catch {
-                    // Some browsers don't support setPositionState
-                  }
+                  } catch { /* ignore */ }
                 }
               }, 500);
             }
           } else if (event.data === 2) {
-            // Only reflect PAUSED state when the tab is actually visible
-            // (hidden tab browsers silently pause YouTube — we ignore it)
-            if (!tabHiddenRef.current) {
-              setIsPlaying(false);
-            } else if (!isLoadingVideoRef.current) {
-              // Tab is hidden and NOT in the middle of loading a new video —
-              // force resume. (Calling playVideo during loadVideoById can confuse
-              // the player and cause the second song to stop.)
-              try { playerRef.current?.playVideo(); } catch { /* ignore */ }
-            }
+            if (!tabHiddenRef.current) setIsPlaying(false);
           } else if (event.data === 0) {
-            if (intervalRef.current) {
-              clearInterval(intervalRef.current);
-              intervalRef.current = null;
-            }
+            if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
             setProgress(0);
-            // Ensure silent audio stays playing to preserve the media session
-            // across song transitions (critical for Android background playback)
-            if (silentAudioRef.current?.paused) {
-              silentAudioRef.current.play().catch(() => {});
-            }
             playNextRef.current();
           }
         },
@@ -457,7 +283,6 @@ export function PlayerBar() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-
     if (window.YT?.Player) {
       initPlayer();
     } else {
@@ -468,12 +293,10 @@ export function PlayerBar() {
         document.head.appendChild(tag);
       }
     }
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [initPlayer]);
 
+  // ── MediaSession setup ────────────────────────────────────────────────────
   useEffect(() => {
     if (!mounted || typeof window === "undefined") return;
     if (!("mediaSession" in navigator)) return;
@@ -503,136 +326,233 @@ export function PlayerBar() {
       action: MediaSessionAction,
       handler: MediaSessionActionHandler | null
     ) => {
-      try {
-        mediaSession.setActionHandler(action, handler);
-      } catch {
-        // Some browsers support MediaSession without all action handlers.
-      }
+      try { mediaSession.setActionHandler(action, handler); } catch { /* ignore */ }
     };
 
     safeSetActionHandler("play", () => {
       setIsPlaying(true);
-      // Directly resume YouTube player — needed when lock screen controls are used
-      try { playerRef.current?.playVideo(); } catch { /* ignore */ }
-      startAudioKeepalive();
+      if (usingNativeAudioRef.current) {
+        audioRef.current?.play().catch(() => {});
+      } else {
+        try { playerRef.current?.playVideo(); } catch { /* ignore */ }
+      }
     });
     safeSetActionHandler("pause", () => {
       setIsPlaying(false);
-      try { playerRef.current?.pauseVideo(); } catch { /* ignore */ }
+      if (usingNativeAudioRef.current) {
+        audioRef.current?.pause();
+      } else {
+        try { playerRef.current?.pauseVideo(); } catch { /* ignore */ }
+      }
     });
     safeSetActionHandler("previoustrack", () => playPrev());
     safeSetActionHandler("nexttrack", () => playNext());
+    safeSetActionHandler("seekto", (details) => {
+      if (details.seekTime != null) {
+        if (usingNativeAudioRef.current && audioRef.current) {
+          audioRef.current.currentTime = details.seekTime;
+        } else {
+          playerRef.current?.seekTo(details.seekTime, true);
+        }
+      }
+    });
 
     return () => {
       safeSetActionHandler("play", null);
       safeSetActionHandler("pause", null);
       safeSetActionHandler("previoustrack", null);
       safeSetActionHandler("nexttrack", null);
+      safeSetActionHandler("seekto", null);
     };
-  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext, startAudioKeepalive]);
+  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
 
-  // ── Load new video when currentSong changes ───────────────────────────────
+  // ── Load new song when currentSong changes ────────────────────────────────
+  // Strategy: Try native <audio> via our stream proxy first.
+  // If that fails, fall back to YouTube IFrame.
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
+    const videoId = currentSong.youtube_video_id;
+    const songId = currentSong.id;
+
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
-    if (playerRef.current) {
-      // Mark loading so the state-2 handler doesn't fire playVideo prematurely
-      isLoadingVideoRef.current = true;
+    audioLoadingRef.current = true;
 
-      // Clear any pending retry from a previous transition
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = null;
-      }
+    // Abort controller for cleanup
+    const abortController = new AbortController();
 
-      playerRef.current.loadVideoById(currentSong.youtube_video_id);
+    async function loadNativeAudio() {
+      try {
+        const res = await fetch(`/api/youtube/audio/${videoId}`, {
+          signal: abortController.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.url) throw new Error("No URL returned");
 
-      // Reset MediaSession position for the new track immediately
-      if ("mediaSession" in navigator) {
-        try {
-          navigator.mediaSession.setPositionState({ duration: 0, playbackRate: 1, position: 0 });
-        } catch { /* ignore */ }
-        // While hidden the playbackState might still read "paused" — set it now
-        if (usePlayerStore.getState().isPlaying) {
-          try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
-        }
-      }
+        // Check if this effect is still relevant (song might have changed)
+        if (abortController.signal.aborted) return;
+        if (usePlayerStore.getState().currentSong?.id !== songId) return;
 
-      // If the screen is off, autoplay may be silently blocked after loading.
-      // Schedule multiple retries: if the player isn't playing, keep trying.
-      if (document.hidden && usePlayerStore.getState().isPlaying) {
-        let retryCount = 0;
-        const maxRetries = 5;
-        const scheduleRetry = () => {
-          // Increasing delays: 1.5s, 2.5s, 3.5s, 5s, 7s
-          const delay = [1500, 2500, 3500, 5000, 7000][retryCount] ?? 5000;
-          retryTimeoutRef.current = setTimeout(() => {
-            retryTimeoutRef.current = null;
-            isLoadingVideoRef.current = false;
-            if (!usePlayerStore.getState().isPlaying) return;
-            const p = playerRef.current;
-            if (!p) return;
-            const state = p.getPlayerState?.();
-            // state 1 = playing, 3 = buffering — both are fine
-            if (state !== 1 && state !== 3) {
-              try { p.playVideo(); } catch { /* ignore */ }
-              // Re-assert media session so lock-screen controls stay
-              if ("mediaSession" in navigator && currentSong) {
-                try {
-                  navigator.mediaSession.metadata = new MediaMetadata({
-                    title: currentSong.title,
-                    artist: currentSong.artist,
-                    album: "Pulsebox",
-                    artwork: currentSong.thumbnail
-                      ? [
-                          { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
-                          { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
-                          { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
-                        ]
-                      : [],
-                  });
-                  navigator.mediaSession.playbackState = "playing";
-                } catch { /* ignore */ }
-              }
-              retryCount++;
-              if (retryCount < maxRetries) {
-                scheduleRetry();
-              }
+        const audio = audioRef.current;
+        if (!audio) return;
+
+        // Set up native audio
+        usingNativeAudioRef.current = true;
+        audio.src = data.url;
+        audio.load();
+
+        // Set up event handlers for this track
+        const onPlay = () => {
+          if (usePlayerStore.getState().currentSong?.id === songId) {
+            setIsPlaying(true);
+            if ("mediaSession" in navigator) {
+              try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
             }
-          }, delay);
+          }
         };
-        scheduleRetry();
+        const onPause = () => {
+          if (usePlayerStore.getState().currentSong?.id === songId) {
+            setIsPlaying(false);
+            if ("mediaSession" in navigator) {
+              try { navigator.mediaSession.playbackState = "paused"; } catch { /* ignore */ }
+            }
+          }
+        };
+        const onEnded = () => {
+          setProgress(0);
+          playNextRef.current();
+        };
+        const onTimeUpdate = () => {
+          const cur = audio.currentTime;
+          const dur = audio.duration;
+          if (dur > 0 && isFinite(dur)) {
+            setProgress((cur / dur) * 100);
+            setDuration(dur);
+            if ("mediaSession" in navigator) {
+              try {
+                navigator.mediaSession.setPositionState({
+                  duration: dur, playbackRate: 1, position: Math.min(cur, dur),
+                });
+              } catch { /* ignore */ }
+            }
+          }
+        };
+        const onLoadedMetadata = () => {
+          if (audio.duration && isFinite(audio.duration)) {
+            setDuration(audio.duration);
+          }
+        };
+        const onError = () => {
+          // Native audio failed after loading — fall back to iframe
+          console.warn("[player] Native audio playback error, falling back to iframe");
+          usingNativeAudioRef.current = false;
+          audio.removeEventListener("play", onPlay);
+          audio.removeEventListener("pause", onPause);
+          audio.removeEventListener("ended", onEnded);
+          audio.removeEventListener("timeupdate", onTimeUpdate);
+          audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+          audio.removeEventListener("error", onError);
+          fallbackToIframe();
+        };
+
+        audio.addEventListener("play", onPlay);
+        audio.addEventListener("pause", onPause);
+        audio.addEventListener("ended", onEnded);
+        audio.addEventListener("timeupdate", onTimeUpdate);
+        audio.addEventListener("loadedmetadata", onLoadedMetadata);
+        audio.addEventListener("error", onError);
+
+        // Start playback
+        await audio.play();
+        audioLoadingRef.current = false;
+
+        // If video panel is showing, load the video (muted) for visuals
+        if (usePlayerStore.getState().showVideo && playerRef.current) {
+          (playerRef.current as unknown as { mute: () => void }).mute();
+          playerRef.current.loadVideoById(videoId);
+        }
+
+        // Cleanup listeners when song changes
+        abortController.signal.addEventListener("abort", () => {
+          audio.removeEventListener("play", onPlay);
+          audio.removeEventListener("pause", onPause);
+          audio.removeEventListener("ended", onEnded);
+          audio.removeEventListener("timeupdate", onTimeUpdate);
+          audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+          audio.removeEventListener("error", onError);
+        });
+      } catch (err) {
+        if (abortController.signal.aborted) return;
+        console.warn("[player] Native audio fetch failed, falling back to iframe:", err);
+        fallbackToIframe();
       }
     }
+
+    function fallbackToIframe() {
+      usingNativeAudioRef.current = false;
+      audioLoadingRef.current = false;
+      if (playerRef.current) {
+        isLoadingVideoRef.current = true;
+        (playerRef.current as unknown as { unMute: () => void }).unMute();
+        playerRef.current.loadVideoById(videoId);
+      }
+    }
+
+    loadNativeAudio();
+
+    return () => {
+      abortController.abort();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSong?.youtube_video_id, currentSong?.id]);
+
+  // When user toggles video on while native audio is playing, load video muted
+  useEffect(() => {
+    if (!showVideo || !currentSong?.youtube_video_id || !playerRef.current) return;
+    if (usingNativeAudioRef.current) {
+      (playerRef.current as unknown as { mute: () => void }).mute();
+      playerRef.current.loadVideoById(currentSong.youtube_video_id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showVideo]);
 
   useEffect(() => {
     setLiked(currentSong?.liked ?? false);
   }, [currentSong?.liked]);
 
+  // Sync play/pause state to the active audio source
   useEffect(() => {
-    if (!playerRef.current || !currentSong) return;
-    // Never forcibly pause while the tab is hidden
-    if (!isPlaying && tabHiddenRef.current) return;
-    try {
-      if (isPlaying) {
-        playerRef.current.playVideo();
-      } else {
-        playerRef.current.pauseVideo();
+    if (!currentSong) return;
+    if (usingNativeAudioRef.current) {
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (isPlaying && audio.paused && audio.src) {
+        audio.play().catch(() => {});
+      } else if (!isPlaying && !audio.paused) {
+        audio.pause();
       }
-    } catch {
-      // player may not be ready yet
+    } else {
+      if (!playerRef.current) return;
+      if (!isPlaying && tabHiddenRef.current) return;
+      try {
+        if (isPlaying) playerRef.current.playVideo();
+        else playerRef.current.pauseVideo();
+      } catch { /* player may not be ready */ }
     }
   }, [isPlaying, currentSong]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   function handleProgressClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (!playerRef.current || duration === 0) return;
+    if (duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    playerRef.current.seekTo(pct * duration, true);
+    if (usingNativeAudioRef.current && audioRef.current) {
+      audioRef.current.currentTime = pct * duration;
+    } else if (playerRef.current) {
+      playerRef.current.seekTo(pct * duration, true);
+    }
     setProgress(pct * 100);
   }
 
@@ -751,10 +671,7 @@ export function PlayerBar() {
               <SkipBack size={30} />
             </button>
             <button
-              onClick={() => {
-                if (!isPlaying) startAudioKeepalive();
-                setIsPlaying(!isPlaying);
-              }}
+              onClick={() => setIsPlaying(!isPlaying)}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
               {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
@@ -1002,12 +919,7 @@ export function PlayerBar() {
               <SkipBack size={18} />
             </button>
             <button
-              onClick={() => {
-                // Ensure AudioContext is resumed in this user gesture context
-                // (Android Chrome: AudioContext created outside a gesture is suspended)
-                if (!isPlaying) startAudioKeepalive();
-                setIsPlaying(!isPlaying);
-              }}
+              onClick={() => setIsPlaying(!isPlaying)}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
