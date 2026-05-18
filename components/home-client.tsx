@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Music, Plus, X, Loader2 } from "lucide-react";
+import { Music, Plus, X, Loader2, Heart } from "lucide-react";
 
 type SongPreview = { name: string; artist: string };
 type PreviewData = { playlistName: string; totalSongs: number; songs: SongPreview[] };
@@ -18,9 +18,10 @@ type SavedPlaylist = { id: string; name: string; slug: string; created_at: strin
 
 type Props = {
   playlists: SavedPlaylist[];
+  likedCount: number;
 };
 
-export function HomeClient({ playlists }: Props) {
+export function HomeClient({ playlists, likedCount }: Props) {
   const router = useRouter();
 
   // ── Spotify section ──────────────────────────────────────────────────────
@@ -131,7 +132,7 @@ export function HomeClient({ playlists }: Props) {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <main className="min-h-screen bg-[linear-gradient(180deg,_#07111f_0%,_#04070d_100%)] px-4 py-10 text-white sm:px-8">
+    <main className="min-h-screen bg-[linear-gradient(180deg,_#07111f_0%,_#04070d_100%)] px-3 py-8 text-white sm:px-8 sm:py-10">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
 
         {/* ── Header ── */}
@@ -325,26 +326,38 @@ export function HomeClient({ playlists }: Props) {
               New playlist
             </button>
           </div>
-          {playlists.length > 0 ? (
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              {playlists.map((pl) => (
-                <Link
-                  key={pl.id}
-                  href={`/playlist/${pl.slug}`}
-                  className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/[0.02] px-4 py-3 text-sm text-white transition-all hover:border-cyan-400/30 hover:bg-white/[0.05]"
-                >
-                  <Music size={16} className="shrink-0 text-slate-500" />
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{pl.name}</p>
-                    <p className="text-xs text-slate-500">
-                      {new Date(pl.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-3 text-sm text-slate-500">
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            {/* Pinned Favs card — always visible */}
+            <Link
+              href="/favs"
+              className="flex items-center gap-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.04] px-4 py-3 text-sm text-white transition-all hover:border-rose-400/40 hover:bg-rose-500/[0.08]"
+            >
+              <Heart size={16} className={`shrink-0 ${likedCount > 0 ? "fill-rose-400 text-rose-400" : "text-slate-500"}`} />
+              <div className="min-w-0">
+                <p className="truncate font-medium">Favs</p>
+                <p className="text-xs text-slate-500">
+                  {likedCount > 0 ? `${likedCount} liked song${likedCount !== 1 ? "s" : ""}` : "No liked songs yet"}
+                </p>
+              </div>
+            </Link>
+            {playlists.map((pl) => (
+              <Link
+                key={pl.id}
+                href={`/playlist/${pl.slug}`}
+                className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/[0.02] px-4 py-3 text-sm text-white transition-all hover:border-cyan-400/30 hover:bg-white/[0.05]"
+              >
+                <Music size={16} className="shrink-0 text-slate-500" />
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{pl.name}</p>
+                  <p className="text-xs text-slate-500">
+                    {new Date(pl.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+              </Link>
+            ))}
+          </div>
+          {playlists.length === 0 && (
+            <p className="mt-2 text-sm text-slate-500">
               No playlists yet. Import a Spotify playlist or create one manually.
             </p>
           )}

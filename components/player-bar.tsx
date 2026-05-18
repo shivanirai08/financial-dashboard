@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Play,
   Pause,
@@ -30,6 +31,7 @@ function formatTime(sec: number) {
 }
 
 export function PlayerBar() {
+  const router = useRouter();
   const {
     currentSong,
     isPlaying,
@@ -54,11 +56,59 @@ export function PlayerBar() {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
 
-  type VideoSize = "sm" | "md" | "lg";
-  const VIDEO_WIDTHS: Record<VideoSize, number> = { sm: 320, md: 500, lg: 700 };
-  const VIDEO_SIZE_NEXT: Record<VideoSize, VideoSize> = { sm: "md", md: "lg", lg: "sm" };
-  const [videoSize, setVideoSize] = useState<VideoSize>("sm");
+  // ── Draggable video panel ─────────────────────────────────────────────────
+  // Position is stored as { right, bottom } offsets from viewport edges
+  const [panelPos, setPanelPos] = useState({ right: 20, bottom: 88 });
+  const dragState = useRef<{
+    dragging: boolean;
+    startX: number;
+    startY: number;
+    startRight: number;
+    startBottom: number;
+  }>({ dragging: false, startX: 0, startY: 0, startRight: 20, startBottom: 88 });
+
+  function handleDragStart(e: React.PointerEvent<HTMLDivElement>) {
+    // Only drag from the header bar, not from buttons inside it
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragState.current = {
+      dragging: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      startRight: panelPos.right,
+      startBottom: panelPos.bottom,
+    };
+  }
+
+  function handleDragMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragState.current.dragging) return;
+    const dx = e.clientX - dragState.current.startX;
+    const dy = e.clientY - dragState.current.startY;
+    const panelW = VIDEO_WIDTHS[videoSize];
+    const panelH = Math.round(panelW * 0.5625) + 36; // aspect + header
+    const newRight = Math.max(0, Math.min(window.innerWidth - panelW, dragState.current.startRight - dx));
+    const newBottom = Math.max(72, Math.min(window.innerHeight - panelH, dragState.current.startBottom + dy));
+    setPanelPos({ right: newRight, bottom: newBottom });
+  }
+
+  function handleDragEnd() {
+    dragState.current.dragging = false;
+  }
+  const VIDEO_WIDTHS: Record<"sm" | "md" | "lg", number> = { sm: 320, md: 500, lg: 700 };
+  const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = { sm: "md", md: "lg", lg: "sm" };
+  const [videoSize, setVideoSize] = useState<"sm" | "md" | "lg">("sm");
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // When size changes, clamp position so the panel stays on-screen
+  useEffect(() => {
+    const panelW = VIDEO_WIDTHS[videoSize];
+    const panelH = Math.round(panelW * 0.5625) + 36;
+    setPanelPos((p) => ({
+      right: Math.max(0, Math.min(window.innerWidth - panelW, p.right)),
+      bottom: Math.max(72, Math.min(window.innerHeight - panelH, p.bottom)),
+    }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoSize]);
 
   // Track native fullscreen state changes
   useEffect(() => {
@@ -81,6 +131,29 @@ export function PlayerBar() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playNextRef = useRef(playNext);
   playNextRef.current = playNext;
+  // True while the tab is hidden — we block pause to keep audio going
+  const tabHiddenRef = useRef(false);
+
+  // ── Block pause when tab is hidden / screen locked ────────────────────────
+  useEffect(() => {
+    function handleVisibility() {
+      tabHiddenRef.current = document.hidden;
+      // If the tab becomes visible again and we're supposed to be playing,
+      // make sure the player resumes (some browsers pause it silently)
+      if (!document.hidden && playerRef.current) {
+        const state = playerRef.current.getPlayerState?.();
+        // state 2 = PAUSED, but we want to be playing
+        if (state === 2) {
+          const storeIsPlaying = usePlayerStore.getState().isPlaying;
+          if (storeIsPlaying) {
+            try { playerRef.current.playVideo(); } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -108,7 +181,14 @@ export function PlayerBar() {
               }, 500);
             }
           } else if (event.data === 2) {
-            setIsPlaying(false);
+            // Only reflect PAUSED state when the tab is actually visible
+            // (hidden tab browsers silently pause YouTube — we ignore it)
+            if (!tabHiddenRef.current) {
+              setIsPlaying(false);
+            } else {
+              // Tab is hidden — force resume immediately
+              try { playerRef.current?.playVideo(); } catch { /* ignore */ }
+            }
           } else if (event.data === 0) {
             if (intervalRef.current) {
               clearInterval(intervalRef.current);
@@ -158,6 +238,8 @@ export function PlayerBar() {
 
   useEffect(() => {
     if (!playerRef.current || !currentSong) return;
+    // Never forcibly pause while the tab is hidden
+    if (!isPlaying && tabHiddenRef.current) return;
     try {
       if (isPlaying) {
         playerRef.current.playVideo();
@@ -186,6 +268,7 @@ export function PlayerBar() {
     try {
       const res = await fetch(`/api/songs/${currentSong.id}/like`, { method: "PATCH" });
       if (!res.ok) throw new Error("Request failed");
+      router.refresh();
     } catch {
       setLiked(!newLiked);
       updateLike(currentSong.id, !newLiked);
@@ -196,20 +279,30 @@ export function PlayerBar() {
 
   return (
     <>
-      {/* ── Floating video panel ─────────────────────────────────────────── */}
+      {/* ── Floating video panel — draggable ─────────────────────────── */}
       <div
         ref={videoPanelRef}
-        className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl transition-all duration-300 ease-in-out"
+        className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl"
         style={{
-          width: VIDEO_WIDTHS[videoSize],
-          bottom: showVideo && currentSong ? 88 : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
-          right: isFullscreen ? 0 : 20,
+          width: Math.min(VIDEO_WIDTHS[videoSize], typeof window !== "undefined" ? window.innerWidth - 8 : VIDEO_WIDTHS[videoSize]),
+          bottom: showVideo && currentSong ? panelPos.bottom : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
+          right: isFullscreen ? 0 : Math.max(4, panelPos.right),
           opacity: showVideo && currentSong ? 1 : 0,
           pointerEvents: showVideo && currentSong ? "auto" : "none",
+          // No CSS transition on position — drag must be instant
+          transition: "opacity 0.2s, bottom 0.2s",
+          userSelect: "none",
+          touchAction: "none",
         }}
       >
-        {/* Video panel header */}
-        <div className="flex items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm">
+        {/* Header — grab here to drag */}
+        <div
+          className="flex cursor-grab items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm active:cursor-grabbing"
+          onPointerDown={handleDragStart}
+          onPointerMove={handleDragMove}
+          onPointerUp={handleDragEnd}
+          onPointerCancel={handleDragEnd}
+        >
           <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-300">
             {currentSong?.title ?? ""}
           </p>
@@ -327,10 +420,10 @@ export function PlayerBar() {
           />
         </div>
 
-        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-2.5">
+        <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4">
           {/* Song info + like */}
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-slate-800">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+            <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800 sm:h-10 sm:w-10">
               {currentSong?.thumbnail ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -345,15 +438,15 @@ export function PlayerBar() {
               )}
             </div>
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold leading-tight text-white">
+              <p className="truncate text-xs font-semibold leading-tight text-white sm:text-sm">
                 {currentSong?.title ?? "—"}
               </p>
-              <p className="truncate text-xs text-slate-400">{currentSong?.artist ?? ""}</p>
+              <p className="truncate text-[11px] text-slate-400 sm:text-xs">{currentSong?.artist ?? ""}</p>
             </div>
             <button
               onClick={handleLike}
               title={liked ? "Unlike" : "Like"}
-              className={`ml-1 shrink-0 transition-all hover:scale-110 ${
+              className={`ml-1 hidden shrink-0 transition-all hover:scale-110 sm:block ${
                 liked ? "text-rose-400" : "text-slate-600 hover:text-slate-300"
               }`}
             >
@@ -362,11 +455,11 @@ export function PlayerBar() {
           </div>
 
           {/* Playback controls */}
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-0.5 sm:gap-1">
             <button
               onClick={toggleShuffle}
               title="Shuffle"
-              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
+              className={`hidden h-8 w-8 items-center justify-center rounded-lg transition-colors sm:flex ${
                 isShuffle ? "text-cyan-400" : "text-slate-500 hover:text-white"
               }`}
             >
@@ -382,9 +475,9 @@ export function PlayerBar() {
             <button
               onClick={() => setIsPlaying(!isPlaying)}
               title={isPlaying ? "Pause" : "Play"}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
-              {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
+              {isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
             </button>
             <button
               onClick={playNext}
@@ -396,7 +489,7 @@ export function PlayerBar() {
             <button
               onClick={cycleRepeat}
               title={`Repeat: ${repeatMode}`}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
+              className={`hidden h-8 w-8 items-center justify-center rounded-lg transition-colors sm:flex ${
                 repeatMode !== "off" ? "text-cyan-400" : "text-slate-500 hover:text-white"
               }`}
             >
@@ -405,10 +498,19 @@ export function PlayerBar() {
           </div>
 
           {/* Right controls */}
-          <div className="flex flex-1 items-center justify-end gap-2">
+          <div className="flex flex-1 items-center justify-end gap-1.5 sm:gap-2">
             <span className="hidden text-xs tabular-nums text-slate-500 sm:block">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
+            <button
+              onClick={handleLike}
+              title={liked ? "Unlike" : "Like"}
+              className={`flex h-8 w-8 shrink-0 items-center justify-center sm:hidden ${
+                liked ? "text-rose-400" : "text-slate-600"
+              }`}
+            >
+              <Heart size={16} className={liked ? "fill-rose-400" : ""} />
+            </button>
             <button
               onClick={toggleQueue}
               title="Queue"

@@ -4,17 +4,25 @@ import type { DbPlaylist } from "@/lib/types";
 
 export default async function Home() {
   let playlists: Pick<DbPlaylist, "id" | "name" | "slug" | "created_at">[] = [];
+  let likedCount = 0;
   try {
     const supabase = createServerSupabase();
-    const { data } = await supabase
-      .from("playlists")
-      .select("id, name, slug, created_at")
-      .order("created_at", { ascending: false })
-      .limit(12);
-    playlists = (data ?? []) as typeof playlists;
+    const [playlistsResult, likedResult] = await Promise.all([
+      supabase
+        .from("playlists")
+        .select("id, name, slug, created_at")
+        .order("created_at", { ascending: false })
+        .limit(12),
+      supabase
+        .from("songs")
+        .select("id", { count: "exact", head: true })
+        .eq("liked", true),
+    ]);
+    playlists = (playlistsResult.data ?? []) as typeof playlists;
+    likedCount = likedResult.count ?? 0;
   } catch {
     // Supabase not configured yet — show empty library
   }
 
-  return <HomeClient playlists={playlists} />;
+  return <HomeClient playlists={playlists} likedCount={likedCount} />;
 }

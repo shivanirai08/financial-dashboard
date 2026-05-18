@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { syncSpotifyPublicPlaylist } from "@/lib/sync";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: NextRequest) {
   const form = await request.formData();
   const playlistInput = String(form.get("playlist") ?? "").trim();

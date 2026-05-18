@@ -70,6 +70,8 @@ export function SongCard({ song, index }: SongCardProps) {
     try {
       const res = await fetch(`/api/songs/${song.id}/like`, { method: "PATCH" });
       if (!res.ok) throw new Error("Request failed");
+      // Refresh server data so Favs count on home page + /favs list stay in sync
+      router.refresh();
     } catch {
       setLiked(!newLiked);
       updateLike(song.id, !newLiked);
@@ -157,8 +159,8 @@ export function SongCard({ song, index }: SongCardProps) {
 
         {/* Right-side actions */}
         <div className="flex shrink-0 items-center gap-1">
-          {/* Hover-only: watch + like */}
-          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          {/* On mobile always show; on desktop show on hover */}
+          <div className="flex items-center gap-1 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
             {hasVideo && (
               <button
                 onClick={handleWatchVideo}

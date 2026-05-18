@@ -18,12 +18,21 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: hidden;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), sans-serif;
+  overflow-x: hidden;
+  /* Prevent text from causing horizontal scroll */
+  word-break: break-word;
+}
+
+/* Prevent any element from causing horizontal overflow */
+*, *::before, *::after {
+  max-width: 100%;
 }
 
 a,
@@ -51,9 +60,10 @@ code {
   border-radius: 999px;
   border: 1px solid rgba(52, 211, 153, 0.24);
   background: linear-gradient(135deg, #34d399, #1dd4ff);
-  padding: 0.9rem 1.3rem;
+  padding: 0.65rem 1.1rem;
   color: #03111d;
   font-weight: 700;
+  font-size: 0.875rem;
 }
 
 .secondary-button {
@@ -63,9 +73,10 @@ code {
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.04);
-  padding: 0.9rem 1.3rem;
+  padding: 0.65rem 1.1rem;
   color: #f8fbff;
   font-weight: 600;
+  font-size: 0.875rem;
 }
 
 .panel {

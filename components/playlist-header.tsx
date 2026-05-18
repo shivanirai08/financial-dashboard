@@ -72,12 +72,12 @@ export function PlaylistHeader({ playlist, songs }: Props) {
 
   return (
     <>
-      <section className="rounded-[2rem] border border-white/8 bg-white/[0.04] p-7 backdrop-blur-xl">
+      <section className="rounded-2xl border border-white/8 bg-white/[0.04] p-4 backdrop-blur-xl sm:rounded-[2rem] sm:p-7">
         {/* Back + actions row */}
-        <div className="mb-5 flex items-center justify-between gap-3">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => router.back()}
-            className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition-all hover:bg-white/10 hover:text-white"
+            className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition-all hover:bg-white/10 hover:text-white"
           >
             <ArrowLeft size={15} />
             Back
@@ -140,7 +140,7 @@ export function PlaylistHeader({ playlist, songs }: Props) {
                 }
               }}
               autoFocus
-              className="flex-1 rounded-xl border border-cyan-400/40 bg-white/5 px-4 py-2.5 text-2xl font-bold text-white outline-none sm:text-3xl"
+              className="flex-1 rounded-xl border border-cyan-400/40 bg-white/5 px-3 py-2 text-lg font-bold text-white outline-none sm:text-2xl"
             />
             <button
               onClick={handleRename}
@@ -161,7 +161,7 @@ export function PlaylistHeader({ playlist, songs }: Props) {
           </div>
         ) : (
           <div className="mt-2 flex items-start gap-3">
-            <h1 className="flex-1 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+            <h1 className="flex-1 truncate text-xl font-bold tracking-tight text-white sm:text-3xl">
               {playlist.name}
             </h1>
             <button
