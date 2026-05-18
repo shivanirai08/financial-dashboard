@@ -33,6 +33,7 @@ export function SongCard({ song, index }: SongCardProps) {
     (s) => s.songs.find((s2) => s2.id === song.id)?.youtube_video_id ?? song.youtube_video_id
   );
   const hasVideo = Boolean(storeVideo);
+  const mobileTitle = song.title.length > 34 ? `${song.title.slice(0, 31)}...` : song.title;
 
   // Close menu on outside click
   useEffect(() => {
@@ -101,7 +102,7 @@ export function SongCard({ song, index }: SongCardProps) {
     <>
       <article
         onClick={handlePlay}
-        className={`group relative flex cursor-pointer items-center gap-3 rounded-2xl border p-3 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] ${
+        className={`group relative flex w-full max-w-full cursor-pointer items-center gap-2 overflow-hidden rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
             : removing
@@ -110,7 +111,7 @@ export function SongCard({ song, index }: SongCardProps) {
         } ${!hasVideo ? "cursor-default" : ""}`}
       >
         {/* Thumbnail / Placeholder */}
-        <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-slate-800">
+        <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl bg-slate-800 sm:h-14 sm:w-14">
           {song.thumbnail ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -143,13 +144,14 @@ export function SongCard({ song, index }: SongCardProps) {
         {/* Info */}
         <div className="min-w-0 flex-1">
           <p
-            className={`truncate text-sm font-semibold leading-snug ${
+            className={`truncate text-[13px] font-semibold leading-snug sm:text-sm ${
               isActive ? "text-cyan-300" : "text-white"
             }`}
           >
-            {song.title}
+            <span className="sm:hidden">{mobileTitle}</span>
+            <span className="hidden sm:inline">{song.title}</span>
           </p>
-          <p className="mt-0.5 truncate text-xs text-slate-400">{song.artist}</p>
+          <p className="mt-0.5 truncate text-[11px] text-slate-400 sm:text-xs">{song.artist}</p>
           {!hasVideo && (
             <p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-rose-400/70">
               No YouTube match
@@ -165,7 +167,7 @@ export function SongCard({ song, index }: SongCardProps) {
               <button
                 onClick={handleWatchVideo}
                 title="Watch video"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition-all hover:bg-white/12 hover:text-white"
+                className="hidden h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition-all hover:bg-white/12 hover:text-white sm:flex"
               >
                 <Video size={14} />
               </button>
@@ -173,7 +175,7 @@ export function SongCard({ song, index }: SongCardProps) {
             <button
               onClick={handleLike}
               title={liked ? "Unlike" : "Like"}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+              className={`flex h-7 w-7 items-center justify-center rounded-lg border transition-all sm:h-8 sm:w-8 ${
                 liked
                   ? "border-rose-400/40 bg-rose-400/10 text-rose-400"
                   : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/12 hover:text-white"
@@ -191,7 +193,7 @@ export function SongCard({ song, index }: SongCardProps) {
                 setMenuOpen((v) => !v);
               }}
               title="More options"
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
             >
               <MoreVertical size={15} />
             </button>

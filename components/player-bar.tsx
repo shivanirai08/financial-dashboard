@@ -98,6 +98,21 @@ export function PlayerBar() {
   const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = { sm: "md", md: "lg", lg: "sm" };
   const [videoSize, setVideoSize] = useState<"sm" | "md" | "lg">("sm");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showNowPlaying, setShowNowPlaying] = useState(false);
+
+  // Close now-playing drawer when song stops
+  useEffect(() => {
+    if (!currentSong) setShowNowPlaying(false);
+  }, [currentSong]);
+
+  // Close now-playing drawer on ESC
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && showNowPlaying) setShowNowPlaying(false);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showNowPlaying]);
 
   // When size changes, clamp position so the panel stays on-screen
   useEffect(() => {
@@ -279,6 +294,146 @@ export function PlayerBar() {
 
   return (
     <>
+      {/* ── Now-playing full-screen drawer (mobile only) ──────────────── */}
+      <div
+        className={`fixed inset-0 z-[55] flex flex-col overflow-hidden bg-gradient-to-b from-[#0d1a2b] to-[#04070d] sm:hidden transition-transform duration-300 ease-out ${
+          showNowPlaying && currentSong ? "translate-y-0" : "translate-y-full pointer-events-none"
+        }`}
+      >
+        {/* Drag-handle + header */}
+        <div className="flex flex-col items-center px-5 pt-3">
+          <button
+            onClick={() => setShowNowPlaying(false)}
+            className="flex h-8 w-full items-center justify-center"
+            aria-label="Close"
+          >
+            <div className="h-1 w-12 rounded-full bg-white/25" />
+          </button>
+          <div className="flex w-full items-center justify-between py-1">
+            <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Now Playing</p>
+            <button
+              onClick={() => setShowNowPlaying(false)}
+              className="flex h-7 w-7 items-center justify-center rounded-full text-slate-400 hover:text-white"
+            >
+              <ChevronDown size={20} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-1 flex-col justify-between overflow-y-auto px-6 pb-8">
+          {/* Artwork */}
+          <div className="mt-4 aspect-square w-full overflow-hidden rounded-2xl bg-slate-800 shadow-[0_24px_56px_rgba(0,0,0,0.7)]">
+            {currentSong?.thumbnail ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={currentSong.thumbnail} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center">
+                <Music size={64} className="text-slate-600" />
+              </div>
+            )}
+          </div>
+
+          {/* Song info + like */}
+          <div className="mt-6 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[1.15rem] font-bold leading-snug text-white">
+                {currentSong?.title ?? "—"}
+              </p>
+              <p className="mt-0.5 text-sm text-slate-400">{currentSong?.artist ?? ""}</p>
+            </div>
+            <button
+              onClick={handleLike}
+              className={`mt-0.5 shrink-0 transition-transform active:scale-90 ${
+                liked ? "text-rose-400" : "text-slate-500"
+              }`}
+            >
+              <Heart size={24} className={liked ? "fill-rose-400" : ""} />
+            </button>
+          </div>
+
+          {/* Progress scrubber */}
+          <div className="mt-5">
+            <div
+              className="h-1.5 w-full cursor-pointer rounded-full bg-white/15"
+              onClick={handleProgressClick}
+            >
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-sky-500"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="mt-1.5 flex items-center justify-between text-[11px] tabular-nums text-slate-500">
+              <span>{formatTime(currentTime)}</span>
+              <span>{formatTime(duration)}</span>
+            </div>
+          </div>
+
+          {/* Main playback controls */}
+          <div className="mt-3 flex items-center justify-between">
+            <button
+              onClick={toggleShuffle}
+              className={`flex h-11 w-11 items-center justify-center ${
+                isShuffle ? "text-cyan-400" : "text-slate-500"
+              }`}
+            >
+              <Shuffle size={22} />
+            </button>
+            <button
+              onClick={playPrev}
+              className="flex h-12 w-12 items-center justify-center text-white"
+            >
+              <SkipBack size={30} />
+            </button>
+            <button
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
+            >
+              {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
+            </button>
+            <button
+              onClick={playNext}
+              className="flex h-12 w-12 items-center justify-center text-white"
+            >
+              <SkipForward size={30} />
+            </button>
+            <button
+              onClick={cycleRepeat}
+              className={`flex h-11 w-11 items-center justify-center ${
+                repeatMode !== "off" ? "text-cyan-400" : "text-slate-500"
+              }`}
+            >
+              {repeatMode === "one" ? <Repeat1 size={22} /> : <Repeat size={22} />}
+            </button>
+          </div>
+
+          {/* Extra controls row */}
+          <div className="mt-5 flex items-center justify-between gap-3">
+            <button
+              onClick={() => { setShowNowPlaying(false); toggleQueue(); }}
+              className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
+                showQueue
+                  ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                  : "border-white/10 bg-white/5 text-slate-400"
+              }`}
+            >
+              <ListMusic size={16} />
+              Queue
+            </button>
+            <button
+              onClick={() => { setShowNowPlaying(false); toggleVideo(); }}
+              className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
+                showVideo
+                  ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                  : "border-white/10 bg-white/5 text-slate-400"
+              }`}
+            >
+              <Video size={16} />
+              Video
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* ── Floating video panel — draggable ─────────────────────────── */}
       <div
         ref={videoPanelRef}
@@ -421,28 +576,33 @@ export function PlayerBar() {
         </div>
 
         <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4">
-          {/* Song info + like */}
+          {/* Song info — tap on mobile opens now-playing drawer */}
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-            <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800 sm:h-10 sm:w-10">
-              {currentSong?.thumbnail ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={currentSong.thumbnail}
-                  alt={currentSong?.title ?? ""}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center">
-                  <Music size={16} className="text-slate-600" />
-                </div>
-              )}
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-xs font-semibold leading-tight text-white sm:text-sm">
-                {currentSong?.title ?? "—"}
-              </p>
-              <p className="truncate text-[11px] text-slate-400 sm:text-xs">{currentSong?.artist ?? ""}</p>
-            </div>
+            <button
+              onClick={() => setShowNowPlaying(true)}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left sm:cursor-default sm:pointer-events-none sm:gap-3"
+            >
+              <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800 sm:h-10 sm:w-10">
+                {currentSong?.thumbnail ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={currentSong.thumbnail}
+                    alt={currentSong?.title ?? ""}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center">
+                    <Music size={16} className="text-slate-600" />
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-xs font-semibold leading-tight text-white sm:text-sm">
+                  {currentSong?.title ?? "—"}
+                </p>
+                <p className="truncate text-[11px] text-slate-400 sm:text-xs">{currentSong?.artist ?? ""}</p>
+              </div>
+            </button>
             <button
               onClick={handleLike}
               title={liked ? "Unlike" : "Like"}
