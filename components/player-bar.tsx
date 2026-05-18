@@ -294,6 +294,8 @@ export function PlayerBar() {
 
   return (
     <>
+      {currentSong && <div aria-hidden className="h-16" />}
+
       {/* ── Now-playing full-screen drawer (mobile only) ──────────────── */}
       <div
         className={`fixed inset-0 z-[55] flex flex-col overflow-hidden bg-gradient-to-b from-[#0d1a2b] to-[#04070d] sm:hidden transition-transform duration-300 ease-out ${

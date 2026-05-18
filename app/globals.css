@@ -30,8 +30,12 @@ body {
   word-break: break-word;
 }
 
-/* Prevent any element from causing horizontal overflow */
-*, *::before, *::after {
+/* Keep replaced/media elements responsive without breaking layout containers */
+img,
+video,
+canvas,
+svg,
+iframe {
   max-width: 100%;
 }
 
