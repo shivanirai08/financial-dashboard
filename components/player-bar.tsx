@@ -56,6 +56,7 @@ export function PlayerBar() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
   // Position is stored as { right, bottom } offsets from viewport edges
@@ -176,6 +177,45 @@ export function PlayerBar() {
     }
   }, []);
 
+  // ── Web Audio API silent keepalive ─────────────────────────────────────
+  // Keeps the browser audio session alive so YouTube iframe isn't suspended
+  // when the screen locks on Android Chrome PWA.
+  const startAudioKeepalive = useCallback(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as Window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!AudioContextClass) return;
+
+      if (!audioCtxRef.current) {
+        const ctx = new AudioContextClass();
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.00001; // effectively silent
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start();
+        audioCtxRef.current = ctx;
+      } else if (audioCtxRef.current.state === "suspended") {
+        audioCtxRef.current.resume().catch(() => {});
+      }
+    } catch {
+      // Unsupported or blocked.
+    }
+  }, []);
+
+  const stopAudioKeepalive = useCallback(() => {
+    try {
+      if (audioCtxRef.current?.state === "running") {
+        audioCtxRef.current.suspend().catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const requestWakeLock = useCallback(async () => {
     if (typeof window === "undefined" || document.hidden) return;
 
@@ -209,6 +249,10 @@ export function PlayerBar() {
       if (!document.hidden) {
         forceResumeIfNeeded();
         void requestWakeLock();
+        // Resume Web Audio keepalive if OS suspended it during screen lock
+        if (audioCtxRef.current?.state === "suspended") {
+          audioCtxRef.current.resume().catch(() => {});
+        }
       }
     }
 
@@ -235,14 +279,22 @@ export function PlayerBar() {
     if (!mounted) return;
     if (isPlaying && currentSong) {
       void requestWakeLock();
+      startAudioKeepalive();
     } else {
       void releaseWakeLock();
+      stopAudioKeepalive();
     }
-  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock]);
+  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock, startAudioKeepalive, stopAudioKeepalive]);
 
   useEffect(() => {
     return () => {
       void releaseWakeLock();
+      try {
+        audioCtxRef.current?.close();
+      } catch {
+        // ignore
+      }
+      audioCtxRef.current = null;
     };
   }, [releaseWakeLock]);
 
@@ -265,6 +317,18 @@ export function PlayerBar() {
                 const dur = p.getDuration?.() ?? 0;
                 setProgress(dur > 0 ? (cur / dur) * 100 : 0);
                 setDuration(dur);
+                // Keep lock-screen scrubber in sync
+                if ("mediaSession" in navigator && dur > 0) {
+                  try {
+                    navigator.mediaSession.setPositionState({
+                      duration: dur,
+                      playbackRate: 1,
+                      position: Math.min(cur, dur),
+                    });
+                  } catch {
+                    // Some browsers don't support setPositionState
+                  }
+                }
               }, 500);
             }
           } else if (event.data === 2) {
@@ -344,8 +408,16 @@ export function PlayerBar() {
       }
     };
 
-    safeSetActionHandler("play", () => setIsPlaying(true));
-    safeSetActionHandler("pause", () => setIsPlaying(false));
+    safeSetActionHandler("play", () => {
+      setIsPlaying(true);
+      // Directly resume YouTube player — needed when lock screen controls are used
+      try { playerRef.current?.playVideo(); } catch { /* ignore */ }
+      startAudioKeepalive();
+    });
+    safeSetActionHandler("pause", () => {
+      setIsPlaying(false);
+      try { playerRef.current?.pauseVideo(); } catch { /* ignore */ }
+    });
     safeSetActionHandler("previoustrack", () => playPrev());
     safeSetActionHandler("nexttrack", () => playNext());
 
@@ -355,7 +427,7 @@ export function PlayerBar() {
       safeSetActionHandler("previoustrack", null);
       safeSetActionHandler("nexttrack", null);
     };
-  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
+  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext, startAudioKeepalive]);
 
   // ── Load new video when currentSong changes ───────────────────────────────
   useEffect(() => {
