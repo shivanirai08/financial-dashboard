@@ -23,6 +23,7 @@ export function SongCard({ song, index }: SongCardProps) {
   const [likeLoading, setLikeLoading] = useState(false);
   const [showFixModal, setShowFixModal] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showMobileActions, setShowMobileActions] = useState(false);
   const [removing, setRemoving] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -59,6 +60,16 @@ export function SongCard({ song, index }: SongCardProps) {
     } else {
       toggleVideo();
     }
+  }
+
+  function handleOpenActions(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (window.innerWidth < 640) {
+      setShowMobileActions(true);
+      setMenuOpen(false);
+      return;
+    }
+    setMenuOpen((v) => !v);
   }
 
   async function handleLike(e: React.MouseEvent) {
@@ -102,7 +113,7 @@ export function SongCard({ song, index }: SongCardProps) {
     <>
       <article
         onClick={handlePlay}
-        className={`group relative flex w-full max-w-full cursor-pointer items-center gap-2 overflow-hidden rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
+        className={`group relative flex w-full max-w-full cursor-pointer items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:gap-3 sm:p-3 ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
             : removing
@@ -188,10 +199,7 @@ export function SongCard({ song, index }: SongCardProps) {
           {/* 3-dot menu — always visible */}
           <div className="relative" ref={menuRef}>
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setMenuOpen((v) => !v);
-              }}
+              onClick={handleOpenActions}
               title="More options"
               className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 transition-all hover:bg-white/8 hover:text-white sm:h-8 sm:w-8"
             >
@@ -201,7 +209,7 @@ export function SongCard({ song, index }: SongCardProps) {
             {/* Dropdown */}
             {menuOpen && (
               <div
-                className="absolute right-0 top-9 z-30 min-w-[180px] overflow-hidden rounded-xl border border-white/12 bg-[#0d1825] shadow-2xl"
+                className="absolute right-0 top-9 z-40 min-w-[180px] overflow-hidden rounded-xl border border-white/12 bg-[#0d1825] shadow-2xl"
                 onClick={(e) => e.stopPropagation()}
               >
                 <button
@@ -229,6 +237,82 @@ export function SongCard({ song, index }: SongCardProps) {
           </div>
         </div>
       </article>
+
+      {showMobileActions && (
+        <div className="fixed inset-0 z-[65] sm:hidden" onClick={() => setShowMobileActions(false)}>
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+          <div
+            className="absolute bottom-0 left-0 right-0 rounded-t-3xl border-t border-white/10 bg-[#0d1825] px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-white/15" />
+            <div className="mb-4 min-w-0">
+              <p className="truncate text-sm font-semibold text-white">{song.title}</p>
+              <p className="truncate text-xs text-slate-400">{song.artist}</p>
+            </div>
+
+            <div className="space-y-2">
+              {hasVideo && (
+                <button
+                  onClick={(e) => {
+                    handleWatchVideo(e);
+                    setShowMobileActions(false);
+                  }}
+                  className="flex w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm text-slate-100"
+                >
+                  <Video size={16} className="text-slate-400" />
+                  Watch video
+                </button>
+              )}
+
+              <button
+                onClick={(e) => {
+                  handleLike(e);
+                  setShowMobileActions(false);
+                }}
+                className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left text-sm ${
+                  liked
+                    ? "border-rose-400/30 bg-rose-400/10 text-rose-300"
+                    : "border-white/10 bg-white/5 text-slate-100"
+                }`}
+              >
+                <Heart size={16} className={liked ? "fill-rose-400 text-rose-400" : "text-slate-400"} />
+                {liked ? "Remove from favs" : "Add to favs"}
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowMobileActions(false);
+                  setShowFixModal(true);
+                }}
+                className="flex w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm text-slate-100"
+              >
+                <Pencil size={16} className="text-slate-400" />
+                Change YouTube match
+              </button>
+
+              <button
+                onClick={(e) => {
+                  handleRemove(e);
+                  setShowMobileActions(false);
+                }}
+                disabled={removing}
+                className="flex w-full items-center gap-3 rounded-2xl border border-rose-400/20 bg-rose-400/8 px-4 py-3 text-left text-sm text-rose-300 disabled:opacity-50"
+              >
+                <Trash2 size={16} />
+                Remove from playlist
+              </button>
+            </div>
+
+            <button
+              onClick={() => setShowMobileActions(false)}
+              className="mt-3 flex w-full items-center justify-center rounded-2xl border border-white/10 px-4 py-3 text-sm text-slate-300"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {showFixModal && (
         <FixSongModal song={song} onClose={() => setShowFixModal(false)} />
