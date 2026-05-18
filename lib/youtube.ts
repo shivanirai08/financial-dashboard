@@ -1,3 +1,4 @@
+import "cheerio";
 import ytSearch from "yt-search";
 import type { YoutubeSearchResult } from "./types";
 
