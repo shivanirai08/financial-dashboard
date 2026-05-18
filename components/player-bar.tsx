@@ -32,6 +32,7 @@ function formatTime(sec: number) {
 
 export function PlayerBar() {
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
   const {
     currentSong,
     isPlaying,
@@ -144,35 +145,106 @@ export function PlayerBar() {
   }
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const playNextRef = useRef(playNext);
   playNextRef.current = playNext;
   // True while the tab is hidden — we block pause to keep audio going
   const tabHiddenRef = useRef(false);
 
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [liked, setLiked] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const forceResumeIfNeeded = useCallback(() => {
+    const p = playerRef.current;
+    if (!p) return;
+
+    const shouldPlay = usePlayerStore.getState().isPlaying;
+    if (!shouldPlay) return;
+
+    const state = p.getPlayerState?.();
+    if (state === 2 || state === -1) {
+      try {
+        p.playVideo();
+      } catch {
+        // Browser media policies can block this; ignore and retry on next visibility/focus.
+      }
+    }
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    if (typeof window === "undefined" || document.hidden) return;
+
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> };
+    };
+    if (!nav.wakeLock) return;
+
+    try {
+      wakeLockRef.current = await nav.wakeLock.request("screen");
+    } catch {
+      // Unsupported, denied, or blocked by battery saver.
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (!wakeLockRef.current) return;
+    try {
+      await wakeLockRef.current.release();
+    } catch {
+      // ignore
+    } finally {
+      wakeLockRef.current = null;
+    }
+  }, []);
+
   // ── Block pause when tab is hidden / screen locked ────────────────────────
   useEffect(() => {
     function handleVisibility() {
       tabHiddenRef.current = document.hidden;
-      // If the tab becomes visible again and we're supposed to be playing,
-      // make sure the player resumes (some browsers pause it silently)
-      if (!document.hidden && playerRef.current) {
-        const state = playerRef.current.getPlayerState?.();
-        // state 2 = PAUSED, but we want to be playing
-        if (state === 2) {
-          const storeIsPlaying = usePlayerStore.getState().isPlaying;
-          if (storeIsPlaying) {
-            try { playerRef.current.playVideo(); } catch { /* ignore */ }
-          }
-        }
+      if (!document.hidden) {
+        forceResumeIfNeeded();
+        void requestWakeLock();
       }
     }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, []);
 
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [liked, setLiked] = useState(false);
+    function handlePageShow() {
+      forceResumeIfNeeded();
+      void requestWakeLock();
+    }
+
+    function handleFocus() {
+      forceResumeIfNeeded();
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [forceResumeIfNeeded, requestWakeLock]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (isPlaying && currentSong) {
+      void requestWakeLock();
+    } else {
+      void releaseWakeLock();
+    }
+  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock]);
+
+  useEffect(() => {
+    return () => {
+      void releaseWakeLock();
+    };
+  }, [releaseWakeLock]);
 
   // ── YouTube IFrame API bootstrap ──────────────────────────────────────────
   const initPlayer = useCallback(() => {
@@ -236,6 +308,55 @@ export function PlayerBar() {
     };
   }, [initPlayer]);
 
+  useEffect(() => {
+    if (!mounted || typeof window === "undefined") return;
+    if (!("mediaSession" in navigator)) return;
+
+    const mediaSession = navigator.mediaSession;
+
+    if (currentSong) {
+      mediaSession.metadata = new MediaMetadata({
+        title: currentSong.title,
+        artist: currentSong.artist,
+        album: "Pulsebox",
+        artwork: currentSong.thumbnail
+          ? [
+              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
+            ]
+          : [],
+      });
+      mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    } else {
+      mediaSession.metadata = null;
+      mediaSession.playbackState = "none";
+    }
+
+    const safeSetActionHandler = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null
+    ) => {
+      try {
+        mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Some browsers support MediaSession without all action handlers.
+      }
+    };
+
+    safeSetActionHandler("play", () => setIsPlaying(true));
+    safeSetActionHandler("pause", () => setIsPlaying(false));
+    safeSetActionHandler("previoustrack", () => playPrev());
+    safeSetActionHandler("nexttrack", () => playNext());
+
+    return () => {
+      safeSetActionHandler("play", null);
+      safeSetActionHandler("pause", null);
+      safeSetActionHandler("previoustrack", null);
+      safeSetActionHandler("nexttrack", null);
+    };
+  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
+
   // ── Load new video when currentSong changes ───────────────────────────────
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
@@ -291,6 +412,9 @@ export function PlayerBar() {
   }
 
   const currentTime = duration > 0 ? (progress / 100) * duration : 0;
+
+  // Prevent SSR/client mismatch when persisted player state exists only on client.
+  if (!mounted) return null;
 
   return (
     <>
