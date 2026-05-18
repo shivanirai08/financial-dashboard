@@ -1,24 +1,14 @@
-import "cheerio";
-import ytSearch from "yt-search";
 import type { YoutubeSearchResult } from "./types";
 
-type YtAuthor = {
-  name?: string;
-};
-
-type YtVideo = {
+type YtThumb = { url?: string };
+type YtRun = { text?: string };
+type YtRenderer = {
   videoId?: string;
-  title?: string;
-  author?: YtAuthor;
-  timestamp?: string;
-  duration?: {
-    seconds?: number;
-  };
-  image?: string;
-};
-
-type YtSearchResult = {
-  videos?: YtVideo[];
+  title?: { runs?: YtRun[]; simpleText?: string };
+  ownerText?: { runs?: YtRun[] };
+  longBylineText?: { runs?: YtRun[] };
+  lengthText?: { simpleText?: string; runs?: YtRun[] };
+  thumbnail?: { thumbnails?: YtThumb[] };
 };
 
 export type YoutubeSearchItem = {
@@ -48,13 +38,101 @@ function simplifyQuery(query: string): string {
   );
 }
 
-async function runSearch(query: string): Promise<YtVideo[]> {
-  const result = (await ytSearch(query)) as YtSearchResult;
-  return result.videos ?? [];
+function textFromRuns(data?: { runs?: YtRun[]; simpleText?: string } | null): string {
+  if (!data) return "";
+  if (data.simpleText) return data.simpleText;
+  return (data.runs ?? []).map((r) => r.text ?? "").join("").trim();
+}
+
+function parseDurationToSeconds(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(":").map((p) => Number(p));
+  if (parts.some((n) => Number.isNaN(n))) return null;
+
+  if (parts.length === 2) {
+    const [m, s] = parts;
+    return m * 60 + s;
+  }
+
+  if (parts.length === 3) {
+    const [h, m, s] = parts;
+    return h * 3600 + m * 60 + s;
+  }
+
+  return null;
+}
+
+function collectVideoRenderers(node: unknown, out: YtRenderer[]) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectVideoRenderers(item, out);
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+  const maybeRenderer = record.videoRenderer;
+  if (maybeRenderer && typeof maybeRenderer === "object") {
+    out.push(maybeRenderer as YtRenderer);
+  }
+
+  for (const value of Object.values(record)) {
+    collectVideoRenderers(value, out);
+  }
+}
+
+async function runSearch(query: string): Promise<YoutubeSearchItem[]> {
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&hl=en&gl=US`;
+  const res = await fetch(url, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "accept-language": "en-US,en;q=0.9",
+    },
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    throw new Error(`YouTube search request failed: ${res.status}`);
+  }
+
+  const html = await res.text();
+  const match =
+    html.match(/var ytInitialData = (\{[\s\S]*?\});<\/script>/) ??
+    html.match(/window\["ytInitialData"\] = (\{[\s\S]*?\});<\/script>/);
+
+  if (!match?.[1]) {
+    throw new Error("Unable to parse YouTube search results page");
+  }
+
+  const initialData = JSON.parse(match[1]) as unknown;
+  const renderers: YtRenderer[] = [];
+  collectVideoRenderers(initialData, renderers);
+
+  return renderers
+    .filter((v) => v.videoId)
+    .map((video) => {
+      const videoId = video.videoId as string;
+      const title = textFromRuns(video.title) || "Unknown title";
+      const artist =
+        textFromRuns(video.ownerText) || textFromRuns(video.longBylineText) || "Unknown artist";
+      const durationText = textFromRuns(video.lengthText);
+      const durationSeconds = parseDurationToSeconds(durationText);
+      const thumbnailUrl = video.thumbnail?.thumbnails?.at(-1)?.url ?? null;
+
+      return {
+        videoId,
+        title,
+        artist,
+        durationSeconds,
+        thumbnailUrl,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      } satisfies YoutubeSearchItem;
+    });
 }
 
 export async function searchYoutubeVideos(query: string, limit = 10) {
-  let videos: YtVideo[] = [];
+  let videos: YoutubeSearchItem[] = [];
 
   try {
     videos = await runSearch(query);
@@ -72,20 +150,7 @@ export async function searchYoutubeVideos(query: string, limit = 10) {
     }
   }
 
-  return videos
-    .filter((video) => video.videoId)
-    .slice(0, limit)
-    .map((video) => {
-      const videoId = video.videoId as string;
-      return {
-        videoId,
-        title: video.title ?? "Unknown title",
-        artist: video.author?.name ?? "Unknown artist",
-        durationSeconds: video.duration?.seconds ?? null,
-        thumbnailUrl: video.image ?? null,
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-      } satisfies YoutubeSearchItem;
-    });
+  return videos.slice(0, limit);
 }
 
 export async function getYoutubeSearchResults(query: string, limit = 5): Promise<YoutubeSearchResult[]> {
