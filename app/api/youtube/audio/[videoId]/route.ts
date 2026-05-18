@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { Innertube } from "youtubei.js";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 // Cache Innertube instance (expensive to create)
-let innertubeInstance: Awaited<ReturnType<typeof Innertube.create>> | null = null;
+let innertubeInstance: Awaited<ReturnType<typeof Innertube.create>> | null =
+  null;
 let instanceCreatedAt = 0;
 const INSTANCE_TTL = 30 * 60 * 1000; // 30 minutes
 
@@ -23,52 +25,101 @@ async function getInnertube() {
 // Simple in-memory cache for audio URLs (they last ~6 hours)
 const audioUrlCache = new Map<string, { url: string; expires: number }>();
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function extractAndReturnAudio(streamingData: any, yt: any, videoId: string) {
-  const adaptiveFormats = streamingData.adaptive_formats ?? [];
+// Piped API instances (fallback for datacenter IPs where YouTube blocks streaming data)
+const PIPED_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://pipedapi.in.projectsegfau.lt",
+  "https://api.piped.privacydevs.net",
+  "https://pipedapi.darkness.services",
+];
 
-  // Prefer audio formats: itag 140 (m4a 128kbps) or 251 (opus 160kbps)
-  const audioFormats = adaptiveFormats
-    .filter((f: { mime_type?: string }) => f.mime_type?.startsWith("audio/"))
-    .sort((a: { mime_type?: string; bitrate?: number }, b: { mime_type?: string; bitrate?: number }) => {
-      const aIsMp4 = a.mime_type?.includes("mp4a") ? 1 : 0;
-      const bIsMp4 = b.mime_type?.includes("mp4a") ? 1 : 0;
-      if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-      return (b.bitrate ?? 0) - (a.bitrate ?? 0);
-    });
+async function getAudioFromPiped(videoId: string): Promise<string | null> {
+  for (const instance of PIPED_INSTANCES) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
 
-  if (audioFormats.length === 0) {
-    return NextResponse.json(
-      { error: "No audio formats available" },
-      { status: 404 }
-    );
-  }
+      const res = await fetch(`${instance}/streams/${videoId}`, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      clearTimeout(timeout);
 
-  const bestAudio = audioFormats[0];
-  const audioUrl = await bestAudio.decipher(yt.session.player);
+      if (!res.ok) continue;
 
-  if (!audioUrl) {
-    return NextResponse.json(
-      { error: "Could not decipher audio URL" },
-      { status: 500 }
-    );
-  }
+      const data = await res.json();
+      const audioStreams = data.audioStreams;
+      if (!audioStreams || audioStreams.length === 0) continue;
 
-  // Cache for 5 hours (URLs are valid for ~6 hours)
-  audioUrlCache.set(videoId, {
-    url: audioUrl,
-    expires: Date.now() + 5 * 60 * 60 * 1000,
-  });
+      // Prefer m4a/mp4 audio, then sort by bitrate
+      const sorted = audioStreams
+        .filter((s: { mimeType?: string; url?: string }) => s.url)
+        .sort(
+          (
+            a: { mimeType?: string; bitrate?: number },
+            b: { mimeType?: string; bitrate?: number }
+          ) => {
+            const aIsMp4 = a.mimeType?.includes("mp4") ? 1 : 0;
+            const bIsMp4 = b.mimeType?.includes("mp4") ? 1 : 0;
+            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
+          }
+        );
 
-  // Clean old cache entries periodically
-  if (audioUrlCache.size > 200) {
-    const now = Date.now();
-    for (const [key, val] of audioUrlCache) {
-      if (val.expires < now) audioUrlCache.delete(key);
+      if (sorted.length > 0 && sorted[0].url) {
+        return sorted[0].url;
+      }
+    } catch {
+      continue;
     }
   }
+  return null;
+}
 
-  return NextResponse.json({ url: audioUrl });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function extractWithInnertube(
+  videoId: string
+): Promise<string | null> {
+  try {
+    const yt = await getInnertube();
+
+    // Try clients in order of reliability
+    const clients = ["ANDROID", "IOS", "WEB"] as const;
+
+    for (const client of clients) {
+      try {
+        const info = await yt.getInfo(videoId, { client });
+        if (!info.streaming_data) continue;
+
+        const adaptiveFormats =
+          info.streaming_data.adaptive_formats ?? [];
+        const audioFormats = adaptiveFormats
+          .filter((f) => f.mime_type?.startsWith("audio/"))
+          .sort((a, b) => {
+            const aIsMp4 = a.mime_type?.includes("mp4a") ? 1 : 0;
+            const bIsMp4 = b.mime_type?.includes("mp4a") ? 1 : 0;
+            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
+          });
+
+        if (audioFormats.length === 0) continue;
+
+        const audioUrl = await audioFormats[0].decipher(yt.session.player);
+        if (audioUrl) return audioUrl;
+      } catch (e) {
+        console.warn(
+          `[audio/${videoId}] Client ${client} failed:`,
+          (e as Error).message
+        );
+        continue;
+      }
+    }
+  } catch (e) {
+    console.warn(`[audio/${videoId}] Innertube failed:`, (e as Error).message);
+    innertubeInstance = null;
+  }
+  return null;
 }
 
 export async function GET(
@@ -87,43 +138,35 @@ export async function GET(
     return NextResponse.json({ url: cached.url });
   }
 
-  try {
-    const yt = await getInnertube();
+  // Try Innertube first (works on residential IPs / localhost)
+  let audioUrl = await extractWithInnertube(videoId);
 
-    // Try clients in order of reliability for audio streaming
-    const clients = ["ANDROID", "IOS", "WEB"] as const;
-    let streamingData = null;
+  // Fallback to Piped API (works from datacenter IPs like Vercel)
+  if (!audioUrl) {
+    console.log(`[audio/${videoId}] Innertube failed, trying Piped...`);
+    audioUrl = await getAudioFromPiped(videoId);
+  }
 
-    for (const client of clients) {
-      try {
-        const info = await yt.getInfo(videoId, { client });
-        if (info.streaming_data) {
-          streamingData = info.streaming_data;
-          break;
-        }
-      } catch (e) {
-        console.warn(`[audio/${videoId}] Client ${client} failed:`, (e as Error).message);
-        continue;
-      }
-    }
-
-    if (!streamingData) {
-      return NextResponse.json(
-        { error: "No streaming data available for this video" },
-        { status: 404 }
-      );
-    }
-
-    return extractAndReturnAudio(streamingData, yt, videoId);
-  } catch (error) {
-    console.error(`[api/youtube/audio/${videoId}] Error:`, error);
-
-    // If instance is stale, reset it
-    innertubeInstance = null;
-
+  if (!audioUrl) {
     return NextResponse.json(
-      { error: "Failed to extract audio stream" },
-      { status: 500 }
+      { error: "No streaming data available for this video" },
+      { status: 404 }
     );
   }
+
+  // Cache for 5 hours
+  audioUrlCache.set(videoId, {
+    url: audioUrl,
+    expires: Date.now() + 5 * 60 * 60 * 1000,
+  });
+
+  // Clean old cache entries
+  if (audioUrlCache.size > 200) {
+    const now = Date.now();
+    for (const [key, val] of audioUrlCache) {
+      if (val.expires < now) audioUrlCache.delete(key);
+    }
+  }
+
+  return NextResponse.json({ url: audioUrl });
 }
