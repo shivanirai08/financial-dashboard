@@ -7,6 +7,45 @@ import { searchYoutubeVideos } from "@/lib/youtube";
 import { createServerSupabase } from "@/lib/supabase";
 import { slugify } from "@/lib/slug";
 
+const SEARCH_TIMEOUT_MS = 8000;
+const SEARCH_CONCURRENCY = 8;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise
+      .then((value) => {
+        clearTimeout(t);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(t);
+        reject(err);
+      });
+  });
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let idx = 0;
+
+  async function worker() {
+    while (idx < items.length) {
+      const current = idx;
+      idx += 1;
+      results[current] = await mapper(items[current], current);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 export async function syncSpotifyPublicPlaylist(playlistInput: string) {
   console.log(`[syncSpotifyPublicPlaylist] Starting sync for: ${playlistInput}`);
 
@@ -41,10 +80,9 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
   // Remove old songs so re-sync doesn't create duplicates
   await supabase.from("songs").delete().eq("playlist_id", savedPlaylist.id);
 
-  // Search YouTube for each track; failures are per-song so one bad search doesn't abort all
-  const songsToInsert = [];
-  for (let i = 0; i < trackStrings.length; i++) {
-    const parts = trackStrings[i].split(" - ").map((s) => s.trim());
+  // Search YouTube concurrently with bounded parallelism to stay under serverless timeouts.
+  const songsToInsert = await mapWithConcurrency(trackStrings, SEARCH_CONCURRENCY, async (track, i) => {
+    const parts = track.split(" - ").map((s) => s.trim());
     const title = parts[0] || "Unknown";
     const artist = parts[1] || "Unknown";
 
@@ -54,7 +92,11 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
     let duration: number | null = null;
 
     try {
-      const results = await searchYoutubeVideos(`${title} ${artist} song`, 1);
+      const results = await withTimeout(
+        searchYoutubeVideos(`${title} ${artist} song`, 1),
+        SEARCH_TIMEOUT_MS,
+        `search for ${title}`
+      );
       const first = results[0];
       if (first) {
         videoId = first.videoId;
@@ -63,13 +105,10 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
         duration = first.durationSeconds;
       }
     } catch (err) {
-      console.warn(`[syncSpotifyPublicPlaylist] YouTube search failed for "${title}": ${err}`);
+      console.warn(`[syncSpotifyPublicPlaylist] YouTube search failed for "${title}": ${String(err)}`);
     }
 
-    // Small delay to avoid YouTube rate limiting (302 redirects) during batch sync
-    await new Promise((r) => setTimeout(r, 300));
-
-    songsToInsert.push({
+    return {
       playlist_id: savedPlaylist.id,
       title,
       artist,
@@ -79,8 +118,8 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
       duration,
       position: i,
       liked: false,
-    });
-  }
+    };
+  });
 
   const { error: songsError } = await supabase.from("songs").insert(songsToInsert);
   if (songsError) throw new Error(`Failed to save songs: ${songsError.message}`);

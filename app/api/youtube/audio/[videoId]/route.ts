@@ -4,6 +4,26 @@ import { Innertube } from "youtubei.js";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
+const SOURCE_TIMEOUT_MS = 3500;
+const INVIDIOUS_DISCOVERY_TTL_MS = 60 * 60 * 1000;
+
+type PipedAudioStream = {
+  url?: string;
+  mimeType?: string;
+  bitrate?: number;
+};
+
+type InvidiousInstanceRow = [string, { api?: boolean; uri?: string; monitor?: { uptime?: number } }];
+
+type InvidiousVideoFormat = {
+  type?: string;
+  url?: string;
+  bitrate?: number;
+};
+
+let cachedInvidiousInstances: string[] = [];
+let invidiousCachedAt = 0;
+
 // Cache Innertube instance (expensive to create)
 let innertubeInstance: Awaited<ReturnType<typeof Innertube.create>> | null =
   null;
@@ -38,7 +58,7 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
   for (const instance of PIPED_INSTANCES) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
 
       console.log(`[audio/${videoId}] Trying Piped instance: ${instance}`);
 
@@ -52,22 +72,17 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
         continue;
       }
 
-      const data = await res.json();
+      const data = (await res.json()) as { audioStreams?: PipedAudioStream[] };
       const audioStreams = data.audioStreams;
 
       if (!audioStreams || audioStreams.length === 0) {
         continue;
       }
 
-      // Prefer m4a/mp4 audio, then sort by bitrate
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sorted = audioStreams
-        .filter((s: { mimeType?: string; url?: string }) => s.url)
+        .filter((s) => s.url)
         .sort(
-          (
-            a: { mimeType?: string; bitrate?: number },
-            b: { mimeType?: string; bitrate?: number }
-          ) => {
+          (a, b) => {
             const aIsMp4 = a.mimeType?.includes("mp4") ? 1 : 0;
             const bIsMp4 = b.mimeType?.includes("mp4") ? 1 : 0;
             if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
@@ -79,31 +94,43 @@ async function getAudioFromPiped(videoId: string): Promise<string | null> {
         console.log(`[audio/${videoId}] Got audio from Piped ${instance}`);
         return sorted[0].url;
       }
-    } catch (err) {
+    } catch {
       continue;
     }
   }
   return null;
 }
 
+async function getInvidiousInstances(): Promise<string[]> {
+  if (cachedInvidiousInstances.length > 0 && Date.now() - invidiousCachedAt < INVIDIOUS_DISCOVERY_TTL_MS) {
+    return cachedInvidiousInstances;
+  }
+
+  const res = await fetch("https://api.invidious.io/instances.json", {
+    next: { revalidate: 3600 },
+  });
+  if (!res.ok) return [];
+
+  const data = (await res.json()) as InvidiousInstanceRow[];
+  const instances = data
+    .filter((row) => row[1]?.api === true && !!row[1]?.uri)
+    .sort((a, b) => (b[1]?.monitor?.uptime ?? 0) - (a[1]?.monitor?.uptime ?? 0))
+    .map((row) => row[1].uri as string)
+    .slice(0, 4);
+
+  cachedInvidiousInstances = instances;
+  invidiousCachedAt = Date.now();
+  return instances;
+}
+
 async function getAudioFromInvidious(videoId: string): Promise<string | null> {
   try {
-    const res = await fetch("https://api.invidious.io/instances.json", {
-      next: { revalidate: 3600 } // Cache for 1 hour
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const instances = data
-      .filter((i: any) => i[1]?.api === true)
-      .sort((a: any, b: any) => (b[1]?.monitor?.uptime || 0) - (a[1]?.monitor?.uptime || 0))
-      .map((i: any) => i[1]?.uri);
+    const instances = await getInvidiousInstances();
 
-    for (const instance of instances.slice(0, 5)) {
+    for (const instance of instances) {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
+        const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
 
         console.log(`[audio/${videoId}] Trying Invidious instance: ${instance}`);
         const vidRes = await fetch(`${instance}/api/v1/videos/${videoId}`, {
@@ -114,29 +141,31 @@ async function getAudioFromInvidious(videoId: string): Promise<string | null> {
 
         if (!vidRes.ok) continue;
 
-        const vidData = await vidRes.json();
+        const vidData = (await vidRes.json()) as {
+          adaptiveFormats?: InvidiousVideoFormat[];
+          formatStreams?: InvidiousVideoFormat[];
+        };
         const audioStreams = vidData.adaptiveFormats || vidData.formatStreams || [];
-        
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         const sorted = audioStreams
-          .filter((s: any) => s.type && (s.type.includes("audio/mp4") || s.type.includes("audio/webm")))
-          .sort((a: any, b: any) => {
-            const aIsMp4 = a.type.includes("mp4") ? 1 : 0;
-            const bIsMp4 = b.type.includes("mp4") ? 1 : 0;
+          .filter((s) => !!s.type && !!s.url && (s.type.includes("audio/mp4") || s.type.includes("audio/webm")))
+          .sort((a, b) => {
+            const aIsMp4 = a.type?.includes("mp4") ? 1 : 0;
+            const bIsMp4 = b.type?.includes("mp4") ? 1 : 0;
             if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-            return (b.bitrate || 0) - (a.bitrate || 0);
+            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
           });
 
         if (sorted.length > 0 && sorted[0].url) {
           console.log(`[audio/${videoId}] Got audio from Invidious ${instance}`);
           return sorted[0].url;
         }
-      } catch (err) {
+      } catch {
         continue;
       }
     }
-  } catch (e) {
-    console.error(`[audio/${videoId}] Invidious fallback failed`, e);
+  } catch (err) {
+    console.error(`[audio/${videoId}] Invidious fallback failed`, err);
   }
   return null;
 }
@@ -185,7 +214,7 @@ async function extractWithInnertube(
           );
           return audioUrl;
         }
-      } catch (e) {
+      } catch {
         continue;
       }
     }

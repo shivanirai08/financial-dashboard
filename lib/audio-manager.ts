@@ -31,10 +31,17 @@ export function primeAudioOnGesture() {
   const prevVolume = audio.volume;
   audio.volume = 0;
   audio.src = silentWav;
+  const primedSrc = audio.currentSrc || audio.src;
 
   audio
     .play()
     .then(() => {
+      // Do not clobber src if real playback already replaced the silent source.
+      const stillPriming = (audio.currentSrc || audio.src) === primedSrc;
+      if (!stillPriming) {
+        audio.volume = prevVolume;
+        return;
+      }
       audio.pause();
       audio.removeAttribute("src");
       audio.load();
@@ -42,7 +49,10 @@ export function primeAudioOnGesture() {
     })
     .catch(() => {
       audio.volume = prevVolume;
-      audio.removeAttribute("src");
-      audio.load();
+      const stillPriming = (audio.currentSrc || audio.src) === primedSrc;
+      if (stillPriming) {
+        audio.removeAttribute("src");
+        audio.load();
+      }
     });
 }
