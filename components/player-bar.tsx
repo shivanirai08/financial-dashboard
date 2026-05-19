@@ -20,6 +20,7 @@ import {
   Minimize2,
   ChevronUp,
   ChevronDown,
+  Loader2,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
 import { getPersistentAudio, primeAudioOnGesture } from "@/lib/audio-manager";
@@ -161,8 +162,7 @@ export function PlayerBar() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
-  // Track if audio URL fetch is in progress
-  const audioLoadingRef = useRef(false);
+  const [audioLoading, setAudioLoading] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -380,7 +380,7 @@ export function PlayerBar() {
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
-    audioLoadingRef.current = true;
+    setAudioLoading(true);
 
     // Abort controller for cleanup
     const abortController = new AbortController();
@@ -463,7 +463,7 @@ export function PlayerBar() {
 
         // Start playback
         await audio.play();
-        audioLoadingRef.current = false;
+        setAudioLoading(false);
 
         // If video panel is showing, load the video (muted) for visuals
         if (usePlayerStore.getState().showVideo && playerRef.current) {
@@ -489,7 +489,7 @@ export function PlayerBar() {
 
     function fallbackToIframe() {
       usingNativeAudioRef.current = false;
-      audioLoadingRef.current = false;
+      setAudioLoading(false);
       if (playerRef.current) {
         isLoadingVideoRef.current = true;
         (playerRef.current as unknown as { unMute: () => void }).unMute();
@@ -688,9 +688,12 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayToggle}
-              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
+              disabled={audioLoading}
+              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95 disabled:opacity-60"
             >
-              {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
+              {audioLoading
+                ? <Loader2 size={22} className="animate-spin" />
+                : isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
             </button>
             <button
               onClick={playNext}
@@ -936,10 +939,13 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayToggle}
-              title={isPlaying ? "Pause" : "Play"}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
+              title={audioLoading ? "Loading…" : isPlaying ? "Pause" : "Play"}
+              disabled={audioLoading}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10 disabled:opacity-60"
             >
-              {isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
+              {audioLoading
+                ? <Loader2 size={14} className="animate-spin" />
+                : isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
             </button>
             <button
               onClick={playNext}
