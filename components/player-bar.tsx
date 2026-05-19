@@ -22,6 +22,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
+import { getPersistentAudio, primeAudioOnGesture } from "@/lib/audio-manager";
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -167,21 +168,9 @@ export function PlayerBar() {
     setMounted(true);
   }, []);
 
-  // ── Create the native <audio> element once ────────────────────────────────
+  // ── Reuse one persistent native <audio> element across the app ───────────
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!audioRef.current) {
-      const audio = new Audio();
-      audio.preload = "auto";
-      audioRef.current = audio;
-    }
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-        audioRef.current = null;
-      }
-    };
+    audioRef.current = getPersistentAudio();
   }, []);
 
   const requestWakeLock = useCallback(async () => {
@@ -296,35 +285,16 @@ export function PlayerBar() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [initPlayer]);
 
-  // ── MediaSession setup ────────────────────────────────────────────────────
+  // ── MediaSession action handlers: register once and keep alive ───────────
   useEffect(() => {
     if (!mounted || typeof window === "undefined") return;
     if (!("mediaSession" in navigator)) return;
 
     const mediaSession = navigator.mediaSession;
 
-    if (currentSong) {
-      mediaSession.metadata = new MediaMetadata({
-        title: currentSong.title,
-        artist: currentSong.artist,
-        album: "Pulsebox",
-        artwork: currentSong.thumbnail
-          ? [
-              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
-            ]
-          : [],
-      });
-      mediaSession.playbackState = isPlaying ? "playing" : "paused";
-    } else {
-      mediaSession.metadata = null;
-      mediaSession.playbackState = "none";
-    }
-
     const safeSetActionHandler = (
       action: MediaSessionAction,
-      handler: MediaSessionActionHandler | null
+      handler: MediaSessionActionHandler
     ) => {
       try { mediaSession.setActionHandler(action, handler); } catch { /* ignore */ }
     };
@@ -357,14 +327,47 @@ export function PlayerBar() {
       }
     });
 
-    return () => {
-      safeSetActionHandler("play", null);
-      safeSetActionHandler("pause", null);
-      safeSetActionHandler("previoustrack", null);
-      safeSetActionHandler("nexttrack", null);
-      safeSetActionHandler("seekto", null);
-    };
-  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
+    safeSetActionHandler("stop", () => {
+      setIsPlaying(false);
+      if (usingNativeAudioRef.current) {
+        audioRef.current?.pause();
+        if (audioRef.current) audioRef.current.currentTime = 0;
+      } else {
+        try {
+          playerRef.current?.pauseVideo();
+          playerRef.current?.seekTo(0, true);
+        } catch { /* ignore */ }
+      }
+      try { mediaSession.playbackState = "none"; } catch { /* ignore */ }
+    });
+  }, [mounted, setIsPlaying, playPrev, playNext]);
+
+  // ── MediaSession metadata and playback state ──────────────────────────────
+  useEffect(() => {
+    if (!mounted || typeof window === "undefined") return;
+    if (!("mediaSession" in navigator)) return;
+
+    const mediaSession = navigator.mediaSession;
+
+    if (currentSong) {
+      mediaSession.metadata = new MediaMetadata({
+        title: currentSong.title,
+        artist: currentSong.artist,
+        album: "Pulsebox",
+        artwork: currentSong.thumbnail
+          ? [
+              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
+            ]
+          : [],
+      });
+      mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    } else {
+      mediaSession.metadata = null;
+      mediaSession.playbackState = "none";
+    }
+  }, [mounted, currentSong, isPlaying]);
 
   // ── Load new song when currentSong changes ────────────────────────────────
   // Strategy: Try native <audio> via our stream proxy first.
@@ -395,7 +398,8 @@ export function PlayerBar() {
         if (abortController.signal.aborted) return;
         if (usePlayerStore.getState().currentSong?.id !== songId) return;
 
-        const audio = audioRef.current;
+        const audio = audioRef.current ?? getPersistentAudio();
+        audioRef.current = audio;
         if (!audio) return;
 
         // Set up native audio
@@ -576,6 +580,13 @@ export function PlayerBar() {
     }
   }
 
+  function handlePlayToggle() {
+    if (!isPlaying) {
+      primeAudioOnGesture();
+    }
+    setIsPlaying(!isPlaying);
+  }
+
   const currentTime = duration > 0 ? (progress / 100) * duration : 0;
 
   // Prevent SSR/client mismatch when persisted player state exists only on client.
@@ -676,7 +687,7 @@ export function PlayerBar() {
               <SkipBack size={30} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={handlePlayToggle}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
               {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
@@ -924,7 +935,7 @@ export function PlayerBar() {
               <SkipBack size={18} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={handlePlayToggle}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
