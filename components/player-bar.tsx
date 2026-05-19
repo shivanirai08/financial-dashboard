@@ -23,7 +23,36 @@ import {
   Loader2,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
-import { getPersistentAudio, primeAudioOnGesture } from "@/lib/audio-manager";
+import {
+  getPersistentAudio,
+  primeAudioOnGesture,
+  setAudioCallbacks,
+  updateMediaSessionMetadata,
+} from "@/lib/audio-manager";
+
+// ─── NOTE ON THE THREE FIXES ──────────────────────────────────────────────────
+//
+// FIX 1 — beforeinstallprompt / install prompt stopping audio:
+//   audio-manager.ts captures the event at MODULE LOAD TIME via addEventListener.
+//   This means it is captured before any React component mounts, before any song
+//   plays, and e.preventDefault() stops Chrome's native mini-infobar from ever
+//   auto-appearing mid-playback.
+//
+// FIX 2 — Second song stops + no lock screen:
+//   a) We call updateMediaSessionMetadata() synchronously inside the song-load
+//      useEffect, BEFORE the fetch starts. No gap where lock screen is blank.
+//   b) We call setAudioCallbacks() to update the module-level refs. MediaSession
+//      action handlers were registered ONCE in audio-manager.ts and never torn
+//      down — they always point to the latest callbacks via those refs.
+//   c) We do NOT call audio.load() after setting audio.src. audio.load() resets
+//      the gesture token, causing song 2 to be treated as unauthorized autoplay.
+//
+// FIX 3 — Screen off / home button stops playback:
+//   The audio element is appended to document.body in getPersistentAudio().
+//   MediaSession handlers stay registered at all times. Chrome Android keeps
+//   background audio alive when both of these conditions are true.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -58,13 +87,8 @@ export function PlayerBar() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
-  // Native <audio> element — primary playback method (supports background playback)
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  // Whether we're using native audio (true) or YouTube iframe fallback (false)
-  const usingNativeAudioRef = useRef(false);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
-  // Position is stored as { right, bottom } offsets from viewport edges
   const [panelPos, setPanelPos] = useState({ right: 20, bottom: 88 });
   const dragState = useRef<{
     dragging: boolean;
@@ -75,7 +99,6 @@ export function PlayerBar() {
   }>({ dragging: false, startX: 0, startY: 0, startRight: 20, startBottom: 88 });
 
   function handleDragStart(e: React.PointerEvent<HTMLDivElement>) {
-    // Only drag from the header bar, not from buttons inside it
     if ((e.target as HTMLElement).closest("button")) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragState.current = {
@@ -92,27 +115,40 @@ export function PlayerBar() {
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
     const panelW = VIDEO_WIDTHS[videoSize];
-    const panelH = Math.round(panelW * 0.5625) + 36; // aspect + header
-    const newRight = Math.max(0, Math.min(window.innerWidth - panelW, dragState.current.startRight - dx));
-    const newBottom = Math.max(72, Math.min(window.innerHeight - panelH, dragState.current.startBottom + dy));
+    const panelH = Math.round(panelW * 0.5625) + 36;
+    const newRight = Math.max(
+      0,
+      Math.min(window.innerWidth - panelW, dragState.current.startRight - dx)
+    );
+    const newBottom = Math.max(
+      72,
+      Math.min(window.innerHeight - panelH, dragState.current.startBottom + dy)
+    );
     setPanelPos({ right: newRight, bottom: newBottom });
   }
 
   function handleDragEnd() {
     dragState.current.dragging = false;
   }
-  const VIDEO_WIDTHS: Record<"sm" | "md" | "lg", number> = { sm: 320, md: 500, lg: 700 };
-  const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = { sm: "md", md: "lg", lg: "sm" };
+
+  const VIDEO_WIDTHS: Record<"sm" | "md" | "lg", number> = {
+    sm: 320,
+    md: 500,
+    lg: 700,
+  };
+  const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = {
+    sm: "md",
+    md: "lg",
+    lg: "sm",
+  };
   const [videoSize, setVideoSize] = useState<"sm" | "md" | "lg">("sm");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showNowPlaying, setShowNowPlaying] = useState(false);
 
-  // Close now-playing drawer when song stops
   useEffect(() => {
     if (!currentSong) setShowNowPlaying(false);
   }, [currentSong]);
 
-  // Close now-playing drawer on ESC
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape" && showNowPlaying) setShowNowPlaying(false);
@@ -121,7 +157,6 @@ export function PlayerBar() {
     return () => document.removeEventListener("keydown", onKey);
   }, [showNowPlaying]);
 
-  // When size changes, clamp position so the panel stays on-screen
   useEffect(() => {
     const panelW = VIDEO_WIDTHS[videoSize];
     const panelH = Math.round(panelW * 0.5625) + 36;
@@ -129,10 +164,9 @@ export function PlayerBar() {
       right: Math.max(0, Math.min(window.innerWidth - panelW, p.right)),
       bottom: Math.max(72, Math.min(window.innerHeight - panelH, p.bottom)),
     }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoSize]);
 
-  // Track native fullscreen state changes
   useEffect(() => {
     function handleFsChange() {
       setIsFullscreen(!!document.fullscreenElement);
@@ -149,15 +183,22 @@ export function PlayerBar() {
       document.exitFullscreen?.();
     }
   }
+
+  // ── Refs ──────────────────────────────────────────────────────────────────
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+
+  // Stable refs for queue callbacks — we point MediaSession handlers at these
+  // so we never need to re-register the handlers when queue/index changes.
   const playNextRef = useRef(playNext);
+  const playPrevRef = useRef(playPrev);
   playNextRef.current = playNext;
-  // True while the tab is hidden
-  const tabHiddenRef = useRef(false);
-  // True while loadVideoById is in progress
+  playPrevRef.current = playPrev;
+
+  // Whether native <audio> is handling playback (vs iframe fallback)
+  const usingNativeAudioRef = useRef(false);
   const isLoadingVideoRef = useRef(false);
+  const tabHiddenRef = useRef(false);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -166,75 +207,57 @@ export function PlayerBar() {
 
   useEffect(() => {
     setMounted(true);
+    // Ensure the audio element exists and is in the DOM from the first mount
+    getPersistentAudio();
   }, []);
 
-  // ── Reuse one persistent native <audio> element across the app ───────────
+  // ── Wire up module-level audio callbacks ──────────────────────────────────
+  // This replaces re-registering MediaSession handlers in useEffect.
+  // We just update the refs; the handlers in audio-manager.ts always read
+  // the latest values through the module-level refs.
   useEffect(() => {
-    audioRef.current = getPersistentAudio();
-  }, []);
+    setAudioCallbacks({
+      onNext: () => playNextRef.current(),
+      onPrev: () => playPrevRef.current(),
+      onEnded: () => {
+        setProgress(0);
+        playNextRef.current();
+      },
+    });
+  }, []); // only on mount — the refs always stay current
 
-  const requestWakeLock = useCallback(async () => {
-    if (typeof window === "undefined" || document.hidden) return;
-    const nav = navigator as Navigator & {
-      wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> };
-    };
-    if (!nav.wakeLock) return;
-    try {
-      wakeLockRef.current = await nav.wakeLock.request("screen");
-    } catch {
-      // Unsupported, denied, or blocked by battery saver.
-    }
-  }, []);
-
-  const releaseWakeLock = useCallback(async () => {
-    if (!wakeLockRef.current) return;
-    try {
-      await wakeLockRef.current.release();
-    } catch { /* ignore */ }
-    finally { wakeLockRef.current = null; }
-  }, []);
-
-  // ── Visibility change: re-acquire wake lock when returning ─────────────
+  // ── Visibility change ─────────────────────────────────────────────────────
   useEffect(() => {
     function handleVisibility() {
       tabHiddenRef.current = document.hidden;
-      if (!document.hidden) {
-        void requestWakeLock();
-      }
     }
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [requestWakeLock]);
+  }, []);
 
-  useEffect(() => {
-    if (!mounted) return;
-    if (isPlaying && currentSong) {
-      void requestWakeLock();
-    } else {
-      void releaseWakeLock();
-    }
-  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock]);
-
-  useEffect(() => {
-    return () => { void releaseWakeLock(); };
-  }, [releaseWakeLock]);
-
-  // ── YouTube IFrame API bootstrap (for video display only) ──────────────
+  // ── YouTube IFrame API — VIDEO DISPLAY ONLY ───────────────────────────────
   const initPlayer = useCallback(() => {
     if (!containerRef.current || playerRef.current) return;
 
     playerRef.current = new window.YT.Player(containerRef.current, {
       videoId: "",
-      playerVars: { autoplay: 0, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
+      playerVars: {
+        autoplay: 0,
+        controls: 0,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+      },
       events: {
         onStateChange(event) {
-          // When using native audio, iframe is visual-only — sync it
+          // When native audio is active, iframe is visual-only — keep it muted
           if (usingNativeAudioRef.current) {
-            // Mute the iframe so we don't get double audio
-            try { (playerRef.current as unknown as { mute: () => void })?.mute(); } catch { /* ignore */ }
+            try {
+              (playerRef.current as unknown as { mute: () => void })?.mute();
+            } catch { /* ignore */ }
             return;
           }
-          // Fallback mode: iframe handles audio
+          // Fallback mode: iframe handles audio (when native audio fails)
           if (event.data === 1) {
             isLoadingVideoRef.current = false;
             setIsPlaying(true);
@@ -252,7 +275,9 @@ export function PlayerBar() {
                 if ("mediaSession" in navigator && dur > 0) {
                   try {
                     navigator.mediaSession.setPositionState({
-                      duration: dur, playbackRate: 1, position: Math.min(cur, dur),
+                      duration: dur,
+                      playbackRate: 1,
+                      position: Math.min(cur, dur),
                     });
                   } catch { /* ignore */ }
                 }
@@ -261,7 +286,10 @@ export function PlayerBar() {
           } else if (event.data === 2) {
             if (!tabHiddenRef.current) setIsPlaying(false);
           } else if (event.data === 0) {
-            if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
             setProgress(0);
             playNextRef.current();
           }
@@ -282,96 +310,29 @@ export function PlayerBar() {
         document.head.appendChild(tag);
       }
     }
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, [initPlayer]);
 
-  // ── MediaSession action handlers: register once and keep alive ───────────
+  // ── MediaSession playback state sync ─────────────────────────────────────
+  // IMPORTANT: We only sync playbackState here, NOT metadata and NOT handlers.
+  // Metadata is set synchronously in the song-load effect below.
+  // Handlers are set once in audio-manager.ts and never changed.
   useEffect(() => {
-    if (!mounted || typeof window === "undefined") return;
-    if (!("mediaSession" in navigator)) return;
-
-    const mediaSession = navigator.mediaSession;
-
-    const safeSetActionHandler = (
-      action: MediaSessionAction,
-      handler: MediaSessionActionHandler
-    ) => {
-      try { mediaSession.setActionHandler(action, handler); } catch { /* ignore */ }
-    };
-
-    safeSetActionHandler("play", () => {
-      setIsPlaying(true);
-      if (usingNativeAudioRef.current) {
-        audioRef.current?.play().catch(() => {});
-      } else {
-        try { playerRef.current?.playVideo(); } catch { /* ignore */ }
-      }
-    });
-    safeSetActionHandler("pause", () => {
-      setIsPlaying(false);
-      if (usingNativeAudioRef.current) {
-        audioRef.current?.pause();
-      } else {
-        try { playerRef.current?.pauseVideo(); } catch { /* ignore */ }
-      }
-    });
-    safeSetActionHandler("previoustrack", () => playPrev());
-    safeSetActionHandler("nexttrack", () => playNext());
-    safeSetActionHandler("seekto", (details) => {
-      if (details.seekTime != null) {
-        if (usingNativeAudioRef.current && audioRef.current) {
-          audioRef.current.currentTime = details.seekTime;
-        } else {
-          playerRef.current?.seekTo(details.seekTime, true);
-        }
-      }
-    });
-
-    safeSetActionHandler("stop", () => {
-      setIsPlaying(false);
-      if (usingNativeAudioRef.current) {
-        audioRef.current?.pause();
-        if (audioRef.current) audioRef.current.currentTime = 0;
-      } else {
-        try {
-          playerRef.current?.pauseVideo();
-          playerRef.current?.seekTo(0, true);
-        } catch { /* ignore */ }
-      }
-      try { mediaSession.playbackState = "none"; } catch { /* ignore */ }
-    });
-  }, [mounted, setIsPlaying, playPrev, playNext]);
-
-  // ── MediaSession metadata and playback state ──────────────────────────────
-  useEffect(() => {
-    if (!mounted || typeof window === "undefined") return;
-    if (!("mediaSession" in navigator)) return;
-
-    const mediaSession = navigator.mediaSession;
-
+    if (!mounted || !("mediaSession" in navigator)) return;
     if (currentSong) {
-      mediaSession.metadata = new MediaMetadata({
-        title: currentSong.title,
-        artist: currentSong.artist,
-        album: "Pulsebox",
-        artwork: currentSong.thumbnail
-          ? [
-              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
-            ]
-          : [],
-      });
-      mediaSession.playbackState = isPlaying ? "playing" : "paused";
+      try {
+        navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+      } catch { /* ignore */ }
     } else {
-      mediaSession.metadata = null;
-      mediaSession.playbackState = "none";
+      try {
+        navigator.mediaSession.playbackState = "none";
+      } catch { /* ignore */ }
     }
-  }, [mounted, currentSong, isPlaying]);
+  }, [mounted, isPlaying, currentSong]);
 
   // ── Load new song when currentSong changes ────────────────────────────────
-  // Strategy: Try native <audio> via our stream proxy first.
-  // If that fails, fall back to YouTube IFrame.
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
     const videoId = currentSong.youtube_video_id;
@@ -382,7 +343,14 @@ export function PlayerBar() {
     setLiked(currentSong.liked ?? false);
     setAudioLoading(true);
 
-    // Abort controller for cleanup
+    // ── FIX 2a: Update lock screen metadata IMMEDIATELY, before fetch ────
+    // This keeps the notification alive continuously between song changes.
+    updateMediaSessionMetadata({
+      title: currentSong.title,
+      artist: currentSong.artist ?? undefined,
+      thumbnail: currentSong.thumbnail ?? undefined,
+    });
+
     const abortController = new AbortController();
 
     async function loadNativeAudio() {
@@ -394,20 +362,20 @@ export function PlayerBar() {
         const data = await res.json();
         if (!data.url) throw new Error("No URL returned");
 
-        // Check if this effect is still relevant (song might have changed)
         if (abortController.signal.aborted) return;
         if (usePlayerStore.getState().currentSong?.id !== songId) return;
 
-        const audio = audioRef.current ?? getPersistentAudio();
-        audioRef.current = audio;
-        if (!audio) return;
-
-        // Set up native audio
+        const audio = getPersistentAudio();
         usingNativeAudioRef.current = true;
-        audio.src = data.url;
-        audio.load();
 
-        // Set up event handlers for this track
+        // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
+        // audio.load() resets the user-gesture unlock. Setting src directly
+        // preserves the gesture token from the first user tap.
+        audio.src = data.url;
+        // audio.load() — ← INTENTIONALLY REMOVED — this was the root cause
+
+        // Remove any previous event listeners to avoid duplicates.
+        // We do this by cloning the function refs (see cleanup below).
         const onPlay = () => {
           if (usePlayerStore.getState().currentSong?.id === songId) {
             setIsPlaying(true);
@@ -434,6 +402,16 @@ export function PlayerBar() {
           if (dur > 0 && isFinite(dur)) {
             setProgress((cur / dur) * 100);
             setDuration(dur);
+            // Update position state for seekbar on lock screen
+            if ("mediaSession" in navigator) {
+              try {
+                navigator.mediaSession.setPositionState({
+                  duration: dur,
+                  playbackRate: 1,
+                  position: Math.min(cur, dur),
+                });
+              } catch { /* setPositionState can throw on older Android */ }
+            }
           }
         };
         const onLoadedMetadata = () => {
@@ -442,8 +420,7 @@ export function PlayerBar() {
           }
         };
         const onError = () => {
-          // Native audio failed after loading — fall back to iframe
-          console.warn("[player] Native audio playback error, falling back to iframe");
+          console.warn("[player] Native audio error, falling back to iframe");
           usingNativeAudioRef.current = false;
           audio.removeEventListener("play", onPlay);
           audio.removeEventListener("pause", onPause);
@@ -461,17 +438,15 @@ export function PlayerBar() {
         audio.addEventListener("loadedmetadata", onLoadedMetadata);
         audio.addEventListener("error", onError);
 
-        // Start playback
         await audio.play();
         setAudioLoading(false);
 
-        // If video panel is showing, load the video (muted) for visuals
+        // If video panel is showing, load the video muted for visuals
         if (usePlayerStore.getState().showVideo && playerRef.current) {
           (playerRef.current as unknown as { mute: () => void }).mute();
           playerRef.current.loadVideoById(videoId);
         }
 
-        // Cleanup listeners when song changes
         abortController.signal.addEventListener("abort", () => {
           audio.removeEventListener("play", onPlay);
           audio.removeEventListener("pause", onPause);
@@ -502,28 +477,28 @@ export function PlayerBar() {
     return () => {
       abortController.abort();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSong?.youtube_video_id, currentSong?.id]);
 
-  // When user toggles video on while native audio is playing, load video muted
+  // When video panel is toggled on while native audio plays, load video muted
   useEffect(() => {
     if (!showVideo || !currentSong?.youtube_video_id || !playerRef.current) return;
     if (usingNativeAudioRef.current) {
       (playerRef.current as unknown as { mute: () => void }).mute();
       playerRef.current.loadVideoById(currentSong.youtube_video_id);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showVideo]);
 
   useEffect(() => {
     setLiked(currentSong?.liked ?? false);
   }, [currentSong?.liked]);
 
-  // Sync play/pause state to the active audio source
+  // Sync play/pause state from store → audio element
   useEffect(() => {
     if (!currentSong) return;
     if (usingNativeAudioRef.current) {
-      const audio = audioRef.current;
+      const audio = getPersistentAudio();
       if (!audio) return;
       if (isPlaying && audio.paused && audio.src) {
         audio.play().catch(() => {});
@@ -541,23 +516,25 @@ export function PlayerBar() {
   }, [isPlaying, currentSong]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
+
   function handleProgressClick(e: React.MouseEvent<HTMLDivElement>) {
     if (duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const seekTime = pct * duration;
-    
-    if (usingNativeAudioRef.current && audioRef.current) {
-      audioRef.current.currentTime = seekTime;
+
+    if (usingNativeAudioRef.current) {
+      const audio = getPersistentAudio();
+      if (audio) audio.currentTime = seekTime;
     } else if (playerRef.current) {
       playerRef.current.seekTo(seekTime, true);
     }
     setProgress(pct * 100);
-    
+
     if ("mediaSession" in navigator) {
       try {
         navigator.mediaSession.setPositionState({
-          duration: duration,
+          duration,
           playbackRate: 1,
           position: Math.min(seekTime, duration),
         });
@@ -571,7 +548,9 @@ export function PlayerBar() {
     setLiked(newLiked);
     updateLike(currentSong.id, newLiked);
     try {
-      const res = await fetch(`/api/songs/${currentSong.id}/like`, { method: "PATCH" });
+      const res = await fetch(`/api/songs/${currentSong.id}/like`, {
+        method: "PATCH",
+      });
       if (!res.ok) throw new Error("Request failed");
       router.refresh();
     } catch {
@@ -581,15 +560,26 @@ export function PlayerBar() {
   }
 
   function handlePlayToggle() {
-    if (!isPlaying) {
-      primeAudioOnGesture();
-    }
+    // ── FIX 1 + FIX 2b: prime on every user tap ─────────────────────────
+    // primeAudioOnGesture() is idempotent — only does work on the first call.
+    // This ensures the gesture token is locked in before we change any src.
+    primeAudioOnGesture();
     setIsPlaying(!isPlaying);
+  }
+
+  // Also prime on skip buttons — they trigger playback too
+  function handleNext() {
+    primeAudioOnGesture();
+    playNext();
+  }
+
+  function handlePrev() {
+    primeAudioOnGesture();
+    playPrev();
   }
 
   const currentTime = duration > 0 ? (progress / 100) * duration : 0;
 
-  // Prevent SSR/client mismatch when persisted player state exists only on client.
   if (!mounted) return null;
 
   return (
@@ -599,10 +589,11 @@ export function PlayerBar() {
       {/* ── Now-playing full-screen drawer (mobile only) ──────────────── */}
       <div
         className={`fixed inset-0 z-[55] flex flex-col overflow-hidden bg-gradient-to-b from-[#0d1a2b] to-[#04070d] sm:hidden transition-transform duration-300 ease-out ${
-          showNowPlaying && currentSong ? "translate-y-0" : "translate-y-full pointer-events-none"
+          showNowPlaying && currentSong
+            ? "translate-y-0"
+            : "translate-y-full pointer-events-none"
         }`}
       >
-        {/* Drag-handle + header */}
         <div className="flex flex-col items-center px-5 pt-3">
           <button
             onClick={() => setShowNowPlaying(false)}
@@ -612,7 +603,9 @@ export function PlayerBar() {
             <div className="h-1 w-12 rounded-full bg-white/25" />
           </button>
           <div className="flex w-full items-center justify-between py-1">
-            <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Now Playing</p>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+              Now Playing
+            </p>
             <button
               onClick={() => setShowNowPlaying(false)}
               className="flex h-7 w-7 items-center justify-center rounded-full text-slate-400 hover:text-white"
@@ -623,11 +616,14 @@ export function PlayerBar() {
         </div>
 
         <div className="flex flex-1 flex-col justify-between overflow-y-auto px-6 pb-8">
-          {/* Artwork */}
           <div className="mt-4 aspect-square w-full overflow-hidden rounded-2xl bg-slate-800 shadow-[0_24px_56px_rgba(0,0,0,0.7)]">
             {currentSong?.thumbnail ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={currentSong.thumbnail} alt="" className="h-full w-full object-cover" />
+              <img
+                src={currentSong.thumbnail}
+                alt=""
+                className="h-full w-full object-cover"
+              />
             ) : (
               <div className="flex h-full w-full items-center justify-center">
                 <Music size={64} className="text-slate-600" />
@@ -635,13 +631,14 @@ export function PlayerBar() {
             )}
           </div>
 
-          {/* Song info + like */}
           <div className="mt-6 flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[1.15rem] font-bold leading-snug text-white">
                 {currentSong?.title ?? "—"}
               </p>
-              <p className="mt-0.5 text-sm text-slate-400">{currentSong?.artist ?? ""}</p>
+              <p className="mt-0.5 text-sm text-slate-400">
+                {currentSong?.artist ?? ""}
+              </p>
             </div>
             <button
               onClick={handleLike}
@@ -653,7 +650,6 @@ export function PlayerBar() {
             </button>
           </div>
 
-          {/* Progress scrubber */}
           <div className="mt-5">
             <div
               className="h-1.5 w-full cursor-pointer rounded-full bg-white/15"
@@ -670,7 +666,6 @@ export function PlayerBar() {
             </div>
           </div>
 
-          {/* Main playback controls */}
           <div className="mt-3 flex items-center justify-between">
             <button
               onClick={toggleShuffle}
@@ -681,7 +676,7 @@ export function PlayerBar() {
               <Shuffle size={22} />
             </button>
             <button
-              onClick={playPrev}
+              onClick={handlePrev}
               className="flex h-12 w-12 items-center justify-center text-white"
             >
               <SkipBack size={30} />
@@ -691,12 +686,16 @@ export function PlayerBar() {
               disabled={audioLoading}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95 disabled:opacity-60"
             >
-              {audioLoading
-                ? <Loader2 size={22} className="animate-spin" />
-                : isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
+              {audioLoading ? (
+                <Loader2 size={22} className="animate-spin" />
+              ) : isPlaying ? (
+                <Pause size={26} />
+              ) : (
+                <Play size={26} className="ml-1" />
+              )}
             </button>
             <button
-              onClick={playNext}
+              onClick={handleNext}
               className="flex h-12 w-12 items-center justify-center text-white"
             >
               <SkipForward size={30} />
@@ -711,10 +710,12 @@ export function PlayerBar() {
             </button>
           </div>
 
-          {/* Extra controls row */}
           <div className="mt-5 flex items-center justify-between gap-3">
             <button
-              onClick={() => { setShowNowPlaying(false); toggleQueue(); }}
+              onClick={() => {
+                setShowNowPlaying(false);
+                toggleQueue();
+              }}
               className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 showQueue
                   ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -725,7 +726,10 @@ export function PlayerBar() {
               Queue
             </button>
             <button
-              onClick={() => { setShowNowPlaying(false); toggleVideo(); }}
+              onClick={() => {
+                setShowNowPlaying(false);
+                toggleVideo();
+              }}
               className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 showVideo
                   ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -744,18 +748,24 @@ export function PlayerBar() {
         ref={videoPanelRef}
         className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl"
         style={{
-          width: Math.min(VIDEO_WIDTHS[videoSize], typeof window !== "undefined" ? window.innerWidth - 8 : VIDEO_WIDTHS[videoSize]),
-          bottom: showVideo && currentSong ? panelPos.bottom : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
+          width: Math.min(
+            VIDEO_WIDTHS[videoSize],
+            typeof window !== "undefined"
+              ? window.innerWidth - 8
+              : VIDEO_WIDTHS[videoSize]
+          ),
+          bottom:
+            showVideo && currentSong
+              ? panelPos.bottom
+              : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
           right: isFullscreen ? 0 : Math.max(4, panelPos.right),
           opacity: showVideo && currentSong ? 1 : 0,
           pointerEvents: showVideo && currentSong ? "auto" : "none",
-          // No CSS transition on position — drag must be instant
           transition: "opacity 0.2s, bottom 0.2s",
           userSelect: "none",
           touchAction: "none",
         }}
       >
-        {/* Header — grab here to drag */}
         <div
           className="flex cursor-grab items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm active:cursor-grabbing"
           onPointerDown={handleDragStart}
@@ -766,7 +776,6 @@ export function PlayerBar() {
           <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-300">
             {currentSong?.title ?? ""}
           </p>
-          {/* Cycle size */}
           <button
             onClick={() => setVideoSize((s) => VIDEO_SIZE_NEXT[s])}
             title={`Size: ${videoSize.toUpperCase()} — click to change`}
@@ -774,7 +783,6 @@ export function PlayerBar() {
           >
             {videoSize === "lg" ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
           </button>
-          {/* Fullscreen */}
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
@@ -782,7 +790,6 @@ export function PlayerBar() {
           >
             {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-          {/* Close */}
           <button
             onClick={toggleVideo}
             title="Hide video"
@@ -794,17 +801,20 @@ export function PlayerBar() {
         <div ref={containerRef} className="aspect-video w-full" />
       </div>
 
-      {/* ── Queue panel — slides up above the player bar ─────────────── */}
+      {/* ── Queue panel ─────────────────────────────────────────────────── */}
       <div
         className={`fixed left-0 right-0 z-40 border-t border-white/8 bg-[#04070d]/97 backdrop-blur-2xl transition-all duration-300 ease-in-out ${
-          showQueue && currentSong ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
+          showQueue && currentSong
+            ? "opacity-100 translate-y-0"
+            : "opacity-0 translate-y-4 pointer-events-none"
         }`}
         style={{ bottom: 72 }}
       >
         <div className="mx-auto max-w-2xl">
           <div className="flex items-center justify-between px-5 py-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Queue · {queue.filter((i) => songs[i]?.youtube_video_id).length} playable
+              Queue · {queue.filter((i) => songs[i]?.youtube_video_id).length}{" "}
+              playable
             </p>
             <button
               onClick={toggleQueue}
@@ -817,13 +827,13 @@ export function PlayerBar() {
           <div className="max-h-64 overflow-y-auto pb-3">
             {queue.map((songIndex, queueIdx) => {
               const s = songs[songIndex];
-              // Only show songs that have a YouTube match
               if (!s || !s.youtube_video_id) return null;
               const isCurrent = queueIdx === currentQueuePos;
               return (
                 <button
                   key={s.id}
                   onClick={() => {
+                    primeAudioOnGesture();
                     playAtIndex(songIndex);
                     toggleQueue();
                   }}
@@ -834,7 +844,11 @@ export function PlayerBar() {
                   <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800">
                     {s.thumbnail ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={s.thumbnail} alt="" className="h-full w-full object-cover" />
+                      <img
+                        src={s.thumbnail}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center">
                         <Music size={14} className="text-slate-600" />
@@ -869,7 +883,6 @@ export function PlayerBar() {
           currentSong ? "translate-y-0" : "translate-y-full"
         }`}
       >
-        {/* Seekable progress bar */}
         <div
           className="group/seek h-1 w-full cursor-pointer bg-white/10 transition-all hover:h-1.5"
           onClick={handleProgressClick}
@@ -881,7 +894,6 @@ export function PlayerBar() {
         </div>
 
         <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4">
-          {/* Song info — tap on mobile opens now-playing drawer */}
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
               onClick={() => setShowNowPlaying(true)}
@@ -905,7 +917,9 @@ export function PlayerBar() {
                 <p className="truncate text-xs font-semibold leading-tight text-white sm:text-sm">
                   {currentSong?.title ?? "—"}
                 </p>
-                <p className="truncate text-[11px] text-slate-400 sm:text-xs">{currentSong?.artist ?? ""}</p>
+                <p className="truncate text-[11px] text-slate-400 sm:text-xs">
+                  {currentSong?.artist ?? ""}
+                </p>
               </div>
             </button>
             <button
@@ -919,7 +933,6 @@ export function PlayerBar() {
             </button>
           </div>
 
-          {/* Playback controls */}
           <div className="flex items-center gap-0.5 sm:gap-1">
             <button
               onClick={toggleShuffle}
@@ -931,7 +944,7 @@ export function PlayerBar() {
               <Shuffle size={16} />
             </button>
             <button
-              onClick={playPrev}
+              onClick={handlePrev}
               title="Previous"
               className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
@@ -943,12 +956,16 @@ export function PlayerBar() {
               disabled={audioLoading}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10 disabled:opacity-60"
             >
-              {audioLoading
-                ? <Loader2 size={14} className="animate-spin" />
-                : isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
+              {audioLoading ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : isPlaying ? (
+                <Pause size={17} />
+              ) : (
+                <Play size={17} className="ml-0.5" />
+              )}
             </button>
             <button
-              onClick={playNext}
+              onClick={handleNext}
               title="Next"
               className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
@@ -958,14 +975,15 @@ export function PlayerBar() {
               onClick={cycleRepeat}
               title={`Repeat: ${repeatMode}`}
               className={`hidden h-8 w-8 items-center justify-center rounded-lg transition-colors sm:flex ${
-                repeatMode !== "off" ? "text-cyan-400" : "text-slate-500 hover:text-white"
+                repeatMode !== "off"
+                  ? "text-cyan-400"
+                  : "text-slate-500 hover:text-white"
               }`}
             >
               {repeatMode === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
             </button>
           </div>
 
-          {/* Right controls */}
           <div className="flex flex-1 items-center justify-end gap-1.5 sm:gap-2">
             <span className="hidden text-xs tabular-nums text-slate-500 sm:block">
               {formatTime(currentTime)} / {formatTime(duration)}
