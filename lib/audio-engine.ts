@@ -51,6 +51,9 @@ class AudioEngine {
   // Set to a videoId when the engine directly transitions within the ended handler;
   // playSong() checks this and skips to avoid a duplicate play.
   private directTransitionVideoId: string | null = null;
+  private transitionCount = 0;
+  private currentPlaybackOrdinal = 0;
+  private lastMediaSessionPlaybackState: MediaSessionPlaybackState | "unsupported" = "unsupported";
 
   init(): void {
     this.ensureAudio();
@@ -149,6 +152,14 @@ class AudioEngine {
     const track = this.toEngineTrack(song);
     const audio = this.ensureAudio();
     this.currentTrack = track;
+    this.currentPlaybackOrdinal = this.transitionCount + 1;
+    this.debugLog("playSong:start", {
+      videoId: track.videoId,
+      title: track.title,
+      transitionCount: this.transitionCount,
+      playbackOrdinal: this.currentPlaybackOrdinal,
+      trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+    });
 
     // Use any pre-resolved URL (respects TTL); fall back to a fresh API fetch
     let streamUrl = this.getResolvedUrl(track.videoId);
@@ -164,13 +175,30 @@ class AudioEngine {
 
     // Always reassign src — clears any prior error state on the element
     audio.src = streamUrl;
+    this.debugLog("playSong:src-assigned", {
+      videoId: track.videoId,
+      srcKind: this.describeSrcKind(streamUrl),
+      playbackOrdinal: this.currentPlaybackOrdinal,
+      trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+    });
 
     this.updateMediaSession(track);
 
     try {
       await audio.play();
+      this.debugLog("playSong:play-success", {
+        videoId: track.videoId,
+        playbackOrdinal: this.currentPlaybackOrdinal,
+        trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+      });
     } catch (err) {
       if (generation !== this.playGeneration) return; // superseded — not our error
+      this.debugLog("playSong:play-failed", {
+        videoId: track.videoId,
+        playbackOrdinal: this.currentPlaybackOrdinal,
+        trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+        error: this.describeError(err),
+      });
       throw err;
     }
 
@@ -274,19 +302,23 @@ class AudioEngine {
       this.callbacks.onPlayStateChange?.(true);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "playing";
+        this.lastMediaSessionPlaybackState = navigator.mediaSession.playbackState;
         // Re-apply metadata on every play event — the only reliable hook on iOS
         // after the page was backgrounded or the MediaSession session was reset.
         if (this.currentTrack) {
           this.updateMediaSession(this.currentTrack);
         }
       }
+      this.debugAudioState("event:play");
     });
 
     this.audio.addEventListener("pause", () => {
       this.callbacks.onPlayStateChange?.(false);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "paused";
+        this.lastMediaSessionPlaybackState = navigator.mediaSession.playbackState;
       }
+      this.debugAudioState("event:pause");
     });
 
     this.audio.addEventListener("loadedmetadata", () => {
@@ -297,6 +329,7 @@ class AudioEngine {
         // Tell Android Chrome the real duration so the notification seek bar is accurate
         this.setPositionState(0, duration);
       }
+      this.debugAudioState("event:loadedmetadata");
     });
 
     this.audio.addEventListener("timeupdate", () => {
@@ -326,6 +359,8 @@ class AudioEngine {
     });
 
     this.audio.addEventListener("ended", () => {
+      this.transitionCount += 1;
+      this.debugAudioState("event:ended");
       // ── Direct transition (critical for mobile autoplay) ──────────────────
       // audio.play() for the next track MUST be called synchronously within
       // this trusted media-event handler. Going through React's async state
@@ -341,6 +376,7 @@ class AudioEngine {
           const song = this.nextSong;
 
           this.currentTrack = track;
+          this.currentPlaybackOrdinal = this.transitionCount + 1;
           // Mark so playSong() skips this videoId when React's useEffect fires
           this.directTransitionVideoId = track.videoId;
 
@@ -352,6 +388,14 @@ class AudioEngine {
           // Set new src and update MediaSession BEFORE play() so the lock-screen
           // notification refreshes immediately with no visible gap.
           this.audio.src = nextUrl;
+          this.debugLog("transition:src-assigned", {
+            fromVideoId: this.currentTrack?.videoId,
+            toVideoId: track.videoId,
+            srcKind: this.describeSrcKind(nextUrl),
+            transitionCount: this.transitionCount,
+            playbackOrdinal: this.currentPlaybackOrdinal,
+            trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+          });
           this.updateMediaSession(track);
 
           // play() called synchronously — still within the ended event handler
@@ -364,12 +408,28 @@ class AudioEngine {
           void this.preResolveAndWarmNext();
 
           if (playPromise) {
-            playPromise.catch(() => {
-              if (gen !== this.playGeneration) return;
-              // Direct play failed — clear the guard and let error handling run
-              this.directTransitionVideoId = null;
-              this.callbacks.onError?.(null);
-            });
+            playPromise
+              .then(() => {
+                this.debugLog("transition:play-success", {
+                  videoId: track.videoId,
+                  transitionCount: this.transitionCount,
+                  playbackOrdinal: this.currentPlaybackOrdinal,
+                  trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+                });
+              })
+              .catch((error) => {
+                this.debugLog("transition:play-failed", {
+                  videoId: track.videoId,
+                  transitionCount: this.transitionCount,
+                  playbackOrdinal: this.currentPlaybackOrdinal,
+                  trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+                  error: this.describeError(error),
+                });
+                if (gen !== this.playGeneration) return;
+                // Direct play failed — clear the guard and let error handling run
+                this.directTransitionVideoId = null;
+                this.callbacks.onError?.(null);
+              });
           }
           return;
         }
@@ -380,8 +440,15 @@ class AudioEngine {
     });
 
     this.audio.addEventListener("error", () => {
+      this.debugAudioState("event:error");
       this.callbacks.onError?.(this.audio?.error ?? null);
     });
+
+    for (const eventName of ["loadstart", "canplay", "canplaythrough", "playing", "waiting", "stalled", "suspend", "abort", "emptied"] as const) {
+      this.audio.addEventListener(eventName, () => {
+        this.debugAudioState(`event:${eventName}`);
+      });
+    }
   }
 
   private initMediaSessionOnce(): void {
@@ -466,6 +533,13 @@ class AudioEngine {
     });
 
     session.playbackState = "playing";
+    this.lastMediaSessionPlaybackState = session.playbackState;
+    this.debugLog("media-session:update", {
+      videoId: track.videoId,
+      title: track.title,
+      playbackOrdinal: this.currentPlaybackOrdinal,
+      trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+    });
 
     // Re-register action handlers on every track — Android Chrome can silently
     // drop them after the page is backgrounded or the screen is locked.
@@ -489,6 +563,96 @@ class AudioEngine {
     }
   }
 
+  private isDebugEnabled(): boolean {
+    if (typeof window === "undefined") return false;
+
+    try {
+      const search = new URLSearchParams(window.location.search);
+      if (search.get("audioDebug") === "1") return true;
+      if (window.localStorage.getItem("pulsebox-audio-debug") === "1") return true;
+    } catch {
+      return false;
+    }
+
+    return false;
+  }
+
+  private debugLog(event: string, extra: Record<string, unknown> = {}): void {
+    if (!this.isDebugEnabled()) return;
+
+    const payload = {
+      event,
+      now: new Date().toISOString(),
+      hidden: typeof document !== "undefined" ? document.hidden : undefined,
+      currentTrack: this.currentTrack?.videoId ?? null,
+      nextTrack: this.nextTrack?.videoId ?? null,
+      playbackOrdinal: this.currentPlaybackOrdinal,
+      trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+      ...extra,
+    };
+
+    console.log("[pulsebox-audio]", payload);
+  }
+
+  private debugAudioState(event: string): void {
+    if (!this.isDebugEnabled() || !this.audio) return;
+
+    this.debugLog(event, {
+      readyState: this.audio.readyState,
+      networkState: this.audio.networkState,
+      paused: this.audio.paused,
+      ended: this.audio.ended,
+      currentTime: Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : null,
+      duration: Number.isFinite(this.audio.duration) ? this.audio.duration : null,
+      currentSrc: this.audio.currentSrc || this.audio.src || null,
+      mediaErrorCode: this.audio.error?.code ?? null,
+      mediaErrorMessage: this.audio.error?.message ?? null,
+      mediaSessionPlaybackState: this.getMediaSessionPlaybackState(),
+    });
+  }
+
+  private describeSrcKind(src: string): string {
+    if (src.startsWith("blob:")) return "blob";
+    if (src.startsWith("data:")) return "data";
+    if (src.startsWith("http://") || src.startsWith("https://")) return "remote";
+    return "other";
+  }
+
+  private describeError(error: unknown): Record<string, unknown> {
+    if (error instanceof DOMException) {
+      return {
+        name: error.name,
+        message: error.message,
+      };
+    }
+
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+      };
+    }
+
+    return {
+      value: String(error),
+    };
+  }
+
+  private describeTrackPhase(playbackOrdinal: number): string {
+    if (playbackOrdinal === 2) return "track-2-start";
+    if (playbackOrdinal === 3) return "track-3-start";
+    if (playbackOrdinal > 3) return `track-${playbackOrdinal}-start`;
+    return "track-1-start";
+  }
+
+  private getMediaSessionPlaybackState(): MediaSessionPlaybackState | "unsupported" {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return "unsupported";
+    }
+
+    return navigator.mediaSession.playbackState;
+  }
+
   /**
    * Periodically assert playbackState="playing" while audio is active.
    * Chrome Android aggressively suspends media sessions it considers inactive;
@@ -498,8 +662,32 @@ class AudioEngine {
     if (this.heartbeatInterval) return;
     this.heartbeatInterval = setInterval(() => {
       if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
-      if (!this.audio || this.audio.paused) return;
-      navigator.mediaSession.playbackState = "playing";
+      if (!this.audio) return;
+
+      const sessionState = navigator.mediaSession.playbackState;
+      const shouldBePlaying = !this.audio.paused && !this.audio.ended;
+
+      if (shouldBePlaying) {
+        if (sessionState !== "playing") {
+          this.debugLog("media-session:state-drift", {
+            expected: "playing",
+            actual: sessionState,
+          });
+        }
+        navigator.mediaSession.playbackState = "playing";
+        this.lastMediaSessionPlaybackState = navigator.mediaSession.playbackState;
+        return;
+      }
+
+      if (
+        this.currentTrack &&
+        this.audio.paused &&
+        this.audio.currentTime > 0 &&
+        !this.audio.ended &&
+        sessionState !== "paused"
+      ) {
+        this.debugAudioState("media-session:silent-pause-suspected");
+      }
     }, 5_000);
   }
 
