@@ -48,11 +48,19 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 function getSupabaseClient() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("Missing Supabase environment variables for MP3 cache");
+  const missing: string[] = [];
+  if (!SUPABASE_URL) missing.push("NEXT_PUBLIC_SUPABASE_URL");
+  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing Supabase environment variables for MP3 cache: ${missing.join(", ")}`
+    );
   }
 
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const supabaseUrl = SUPABASE_URL as string;
+  const serviceRoleKey = SUPABASE_SERVICE_ROLE_KEY as string;
+  return createClient(supabaseUrl, serviceRoleKey);
 }
 
 function monthKey(date = new Date()): string {

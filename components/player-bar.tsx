@@ -31,6 +31,8 @@ function formatTime(sec: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const MIN_PLAYBACK_LOADING_MS = 400;
+
 export function PlayerBar() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
@@ -147,6 +149,7 @@ export function PlayerBar() {
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playbackToggleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playbackLoadingStartedAtRef = useRef<number | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const warmedMp3IdsRef = useRef<Set<string>>(new Set());
   const lastQueueWarmKeyRef = useRef("");
@@ -207,6 +210,23 @@ export function PlayerBar() {
     }
   }, []);
 
+  const clearPlaybackLoading = useCallback(() => {
+    const startedAt = playbackLoadingStartedAtRef.current;
+    const elapsed = startedAt ? Date.now() - startedAt : MIN_PLAYBACK_LOADING_MS;
+    const waitMs = Math.max(0, MIN_PLAYBACK_LOADING_MS - elapsed);
+
+    if (playbackToggleTimeoutRef.current) {
+      clearTimeout(playbackToggleTimeoutRef.current);
+      playbackToggleTimeoutRef.current = null;
+    }
+
+    playbackToggleTimeoutRef.current = setTimeout(() => {
+      setIsPlaybackLoading(false);
+      playbackLoadingStartedAtRef.current = null;
+      playbackToggleTimeoutRef.current = null;
+    }, waitMs);
+  }, []);
+
   // ── Block pause when tab is hidden / screen locked ────────────────────────
   useEffect(() => {
     function handleVisibility() {
@@ -265,7 +285,7 @@ export function PlayerBar() {
       events: {
         onStateChange(event) {
           if (event.data === 1) {
-            setIsPlaybackLoading(false);
+            clearPlaybackLoading();
             setIsPlaying(true);
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
@@ -278,7 +298,7 @@ export function PlayerBar() {
               }, 500);
             }
           } else if (event.data === 2) {
-            setIsPlaybackLoading(false);
+            clearPlaybackLoading();
             // Only reflect PAUSED state when the tab is actually visible
             // (hidden tab browsers silently pause YouTube — we ignore it)
             if (!tabHiddenRef.current) {
@@ -298,7 +318,7 @@ export function PlayerBar() {
         },
       },
     });
-  }, [setIsPlaying]);
+  }, [setIsPlaying, clearPlaybackLoading]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -456,6 +476,7 @@ export function PlayerBar() {
   function handlePlayPauseToggle() {
     if (!currentSong) return;
 
+    playbackLoadingStartedAtRef.current = Date.now();
     setIsPlaybackLoading(true);
     if (playbackToggleTimeoutRef.current) {
       clearTimeout(playbackToggleTimeoutRef.current);
