@@ -71,6 +71,10 @@ function getStreamEndpoint(videoId: string) {
   return `/api/stream/${videoId}`;
 }
 
+function getLocalStreamEndpoint(videoId: string) {
+  return `/api/stream/${videoId}`;
+}
+
 type AudioListener = {
   event: keyof HTMLMediaElementEventMap;
   handler: EventListener;
@@ -419,10 +423,26 @@ export function PlayerBar() {
           return;
         }
 
-        const streamEndpoint = getStreamEndpoint(videoId);
-        const res = await fetch(streamEndpoint, {
+        const primaryEndpoint = getStreamEndpoint(videoId);
+        const localEndpoint = getLocalStreamEndpoint(videoId);
+        let selectedEndpoint = primaryEndpoint;
+
+        let res = await fetch(selectedEndpoint, {
           signal: abortController.signal,
         });
+
+        if (!res.ok && selectedEndpoint !== localEndpoint) {
+          // If external backend cannot resolve this specific video, retry with
+          // the local Next API route to maximize playback success.
+          console.warn(
+            `[player] External stream failed (${res.status}), retrying local endpoint`
+          );
+          selectedEndpoint = localEndpoint;
+          res = await fetch(selectedEndpoint, {
+            signal: abortController.signal,
+          });
+        }
+
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         if (!res.body) throw new Error("No stream body");
 
@@ -442,7 +462,7 @@ export function PlayerBar() {
         // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
         // audio.load() resets the user-gesture unlock. Setting src directly
         // preserves the gesture token from the first user tap.
-        audio.src = streamEndpoint;
+        audio.src = selectedEndpoint;
         // audio.load() — ← INTENTIONALLY REMOVED — this was the root cause
 
         const onPlay = () => {

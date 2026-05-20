@@ -93,10 +93,15 @@ async function getInvidiousInstances() {
 async function resolveInnertubeAudioUrl(yt, videoId, client) {
   const info = await yt.getInfo(videoId, { client });
   const adaptiveFormats = info?.streaming_data?.adaptive_formats || [];
-  if (adaptiveFormats.length === 0) return null;
+  const regularFormats = info?.streaming_data?.formats || [];
+  const allFormats = [...adaptiveFormats, ...regularFormats];
+  if (allFormats.length === 0) return null;
 
-  const audioFormats = adaptiveFormats
-    .filter((f) => f?.mime_type?.startsWith("audio/"))
+  const audioFormats = allFormats
+    .filter((f) => {
+      const mime = f?.mime_type || "";
+      return mime.startsWith("audio/") || mime.includes("audio/");
+    })
     .sort((a, b) => {
       const aIsMp4 = a?.mime_type?.includes("mp4a") ? 1 : 0;
       const bIsMp4 = b?.mime_type?.includes("mp4a") ? 1 : 0;
@@ -104,6 +109,25 @@ async function resolveInnertubeAudioUrl(yt, videoId, client) {
     });
 
   for (const format of audioFormats) {
+    if (isHttpUrl(format?.url)) return format.url;
+    try {
+      const deciphered = await format.decipher(yt.session.player);
+      if (isHttpUrl(deciphered)) return deciphered;
+    } catch {
+      // Try next format.
+    }
+  }
+
+  // Some videos only expose muxed A/V formats for certain clients.
+  // As a final Innertube attempt, pick highest bitrate format containing audio.
+  const muxedFormats = allFormats
+    .filter((f) => {
+      const mime = f?.mime_type || "";
+      return mime.includes("audio/");
+    })
+    .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0));
+
+  for (const format of muxedFormats) {
     if (isHttpUrl(format?.url)) return format.url;
     try {
       const deciphered = await format.decipher(yt.session.player);
