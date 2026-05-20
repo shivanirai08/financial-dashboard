@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { writeFile } from "node:fs/promises";
 import cors from "cors";
 import express from "express";
 import YTDlpWrapModule from "yt-dlp-wrap";
@@ -10,10 +11,12 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const REQUEST_TIMEOUT_MS = Number(process.env.SOURCE_TIMEOUT_MS || 5000);
 const CACHE_TTL_MS = Number(process.env.STREAM_URL_CACHE_TTL_MS || 60 * 60 * 1000);
 const YTDLP_BIN_PATH = process.env.YTDLP_PATH || "/tmp/yt-dlp";
+const YTDLP_COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || "/tmp/yt-cookies.txt";
 
 const YTDlpWrap = YTDlpWrapModule?.default ?? YTDlpWrapModule;
 const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
 let ytDlpReadyPromise = null;
+let cookiesReadyPromise = null;
 
 const streamUrlCache = new Map();
 
@@ -34,6 +37,33 @@ async function ensureYtDlpReady() {
   }
 
   await ytDlpReadyPromise;
+}
+
+async function ensureCookiesFile() {
+  if (process.env.YTDLP_COOKIES_FILE) {
+    return process.env.YTDLP_COOKIES_FILE;
+  }
+
+  const encoded = process.env.YTDLP_COOKIES_B64;
+  if (!encoded) return null;
+
+  if (!cookiesReadyPromise) {
+    cookiesReadyPromise = writeFile(
+      YTDLP_COOKIES_PATH,
+      Buffer.from(encoded, "base64").toString("utf8"),
+      { mode: 0o600 }
+    ).then(() => YTDLP_COOKIES_PATH);
+  }
+
+  return cookiesReadyPromise;
+}
+
+function isBotChallengeErrorMessage(message) {
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("sign in to confirm you're not a bot") ||
+    lowered.includes("use --cookies")
+  );
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -78,15 +108,24 @@ async function isPlayableStreamUrl(streamUrl) {
 
 async function extractStreamUrl(videoId) {
   await ensureYtDlpReady();
+  const cookiesPath = await ensureCookiesFile();
 
-  const output = await ytDlpWrap.execPromise([
+  const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
     "-g",
     "--no-playlist",
     "--no-warnings",
+    "--extractor-args",
+    "youtube:player_client=android,web",
     "-f",
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-  ]);
+  ];
+
+  if (cookiesPath) {
+    args.push("--cookies", cookiesPath);
+  }
+
+  const output = await ytDlpWrap.execPromise(args);
   const streamUrl = output
     .split("\n")
     .map((line) => line.trim())
@@ -147,11 +186,22 @@ app.get("/api/youtube/audio/:videoId", async (req, res) => {
 
     return res.json({ streamUrl, url: streamUrl });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    const botChallenge = isBotChallengeErrorMessage(message);
+
     console.error(
       `[audio/${videoId}] yt-dlp extraction error:`,
-      error instanceof Error ? error.message : "unknown error"
+      message
     );
-    return res.status(500).json({ error: "Extraction failed" });
+
+    if (botChallenge) {
+      return res.status(503).json({
+        error: "YouTube bot challenge. Configure YTDLP_COOKIES_FILE or YTDLP_COOKIES_B64.",
+        code: "YOUTUBE_BOT_CHALLENGE",
+      });
+    }
+
+    return res.status(500).json({ error: "Extraction failed", code: "EXTRACTION_FAILED" });
   }
 });
 

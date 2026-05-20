@@ -21,6 +21,8 @@ type EngineCallbacks = {
 const STREAM_BACKEND_BASE =
   process.env.NEXT_PUBLIC_STREAM_BACKEND_URL?.replace(/\/$/, "") ?? "";
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
+const QUEUE_PRELOAD_BATCH_SIZE = 5; // How many tracks to resolve upfront
+const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
 
 class AudioEngine {
   private audio: HTMLAudioElement | null = null;
@@ -32,6 +34,9 @@ class AudioEngine {
   private preloadRequested = new Set<string>();
   private mediaSessionInitialized = false;
   private gestureUnlocked = false;
+  private upcomingTracks: EngineTrack[] = [];
+  private upcomingStreamUrls = new Map<string, string>();
+  private urlRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   init(): void {
     this.ensureAudio();
@@ -54,6 +59,50 @@ class AudioEngine {
     });
   }
 
+  /**
+   * Preload upcoming tracks from the queue upfront.
+   * This is the critical fix for mobile background playback.
+   * Call this when a playlist loads to resolve URLs in batch.
+   */
+  async preloadQueueTracks(songs: DbSong[]): Promise<void> {
+    try {
+      const tracksToPreload = songs
+        .slice(0, QUEUE_PRELOAD_BATCH_SIZE)
+        .filter((s) => s.youtube_video_id)
+        .map((s) => this.toEngineTrack(s));
+
+      this.upcomingTracks = tracksToPreload;
+
+      // Batch resolve all URLs in parallel (not sequential)
+      const resolvePromises = tracksToPreload.map((track) =>
+        this.resolveStreamUrl(track.videoId)
+          .then((url) => {
+            this.upcomingStreamUrls.set(track.videoId, url);
+            return { videoId: track.videoId, url };
+          })
+          .catch(() => {
+            // Keep going on individual failures
+            return null;
+          })
+      );
+
+      await Promise.allSettled(resolvePromises);
+
+      // Start periodic refresh of upcoming URLs to keep them fresh
+      this.startUrlRefreshTimer();
+    } catch {
+      // Best effort only
+    }
+  }
+
+  /**
+   * Get a pre-cached stream URL for an upcoming track.
+   * Returns null if URL is not yet resolved.
+   */
+  getUpcomingStreamUrl(videoId: string): string | null {
+    return this.upcomingStreamUrls.get(videoId) ?? null;
+  }
+
   async playSong(song: DbSong): Promise<void> {
     if (!song.youtube_video_id) {
       throw new Error("Song has no YouTube video id");
@@ -64,12 +113,20 @@ class AudioEngine {
     this.currentTrack = track;
 
     let streamUrl: string;
-    if (this.nextTrack?.videoId === track.videoId && this.nextStreamUrl) {
+    
+    // Try to use pre-cached URL from queue preload first
+    const upcomingUrl = this.getUpcomingStreamUrl(track.videoId);
+    if (upcomingUrl) {
+      streamUrl = upcomingUrl;
+    } else if (this.nextTrack?.videoId === track.videoId && this.nextStreamUrl) {
+      // Fallback to next track preload
       streamUrl = this.nextStreamUrl;
     } else {
+      // Last resort: resolve now (happens on first play or if not in queue)
       streamUrl = await this.resolveStreamUrl(track.videoId);
     }
 
+    // Check if URL is still reachable (optional validation)
     const reachable = await this.isPlayableStreamUrl(streamUrl);
     if (!reachable) {
       streamUrl = await this.resolveStreamUrl(track.videoId, true);
@@ -213,6 +270,7 @@ class AudioEngine {
       }
     };
 
+    // Core playback controls
     safeSet("play", async () => {
       await this.syncPlaybackState(true);
     });
@@ -221,6 +279,16 @@ class AudioEngine {
       void this.syncPlaybackState(false);
     });
 
+    // Play/pause toggle for lockscreen
+    safeSet("playpause", async () => {
+      if (this.audio?.paused) {
+        await this.syncPlaybackState(true);
+      } else {
+        void this.syncPlaybackState(false);
+      }
+    });
+
+    // Queue navigation
     safeSet("nexttrack", async () => {
       this.callbacks.onNext?.();
     });
@@ -229,9 +297,28 @@ class AudioEngine {
       this.callbacks.onPrev?.();
     });
 
+    // Seeking support
     safeSet("seekto", (details) => {
       if (details.seekTime == null) return;
       this.seekTo(details.seekTime);
+    });
+
+    // Seeking forward/backward (for devices with skip buttons)
+    safeSet("seekforward", (details) => {
+      if (!this.audio) return;
+      const skipTime = details.seekOffset ?? 15;
+      this.seekTo(Math.min(this.audio.currentTime + skipTime, this.audio.duration));
+    });
+
+    safeSet("seekbackward", (details) => {
+      if (!this.audio) return;
+      const skipTime = details.seekOffset ?? 15;
+      this.seekTo(Math.max(this.audio.currentTime - skipTime, 0));
+    });
+
+    // Stop handler (important for Android cleanup)
+    safeSet("stop", () => {
+      void this.syncPlaybackState(false);
     });
 
     this.mediaSessionInitialized = true;
@@ -346,6 +433,34 @@ class AudioEngine {
       artist: song.artist ?? undefined,
       thumbnail: song.thumbnail ?? undefined,
     };
+  }
+
+  private startUrlRefreshTimer(): void {
+    // Clear any existing timer
+    if (this.urlRefreshTimer) {
+      clearInterval(this.urlRefreshTimer);
+    }
+
+    // Periodically refresh upcoming track URLs to keep them fresh
+    // Don't refresh during exact transition moments (handled separately)
+    this.urlRefreshTimer = setInterval(() => {
+      this.refreshUpcomingUrls().catch(() => {
+        // Refresh failures are best-effort only
+      });
+    }, URL_REFRESH_INTERVAL_MS);
+  }
+
+  private async refreshUpcomingUrls(): Promise<void> {
+    // Refresh URLs for upcoming tracks in the background
+    // This keeps them valid even if the user is on the same track for a long time
+    for (const track of this.upcomingTracks) {
+      try {
+        const url = await this.resolveStreamUrl(track.videoId, true); // Force refresh
+        this.upcomingStreamUrls.set(track.videoId, url);
+      } catch {
+        // Continue with other tracks if one fails
+      }
+    }
   }
 }
 

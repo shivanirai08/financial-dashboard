@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { DbSong } from "@/lib/types";
+import { audioEngine } from "@/lib/audio-engine";
 
 export type RepeatMode = "off" | "all" | "one";
 
@@ -60,6 +61,11 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       currentQueuePos: -1,
       isPlaying: false,
       currentSong: null,
+    });
+
+    // Trigger batch preload of upcoming track URLs for mobile background playback stability
+    audioEngine.preloadQueueTracks(songs).catch(() => {
+      // Preload is best-effort; failures don't break playback
     });
   },
 
