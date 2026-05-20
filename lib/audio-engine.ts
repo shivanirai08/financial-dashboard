@@ -1,4 +1,5 @@
 import type { DbSong } from "@/lib/types";
+import { mobileMediaCache } from "@/lib/mobile-media-cache";
 
 export type EngineTrack = {
   id: string;
@@ -23,7 +24,7 @@ type EngineCallbacks = {
 };
 
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
-const QUEUE_PRELOAD_BATCH_SIZE = 2; // Keep queue prefetch small to control API usage
+const QUEUE_PRELOAD_BATCH_SIZE = 3; // Keep enough tracks ready for background transitions
 const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
 
 class AudioEngine {
@@ -99,41 +100,16 @@ class AudioEngine {
         return;
       }
 
-      const queueEndpoint = "/api/youtube/audio-mp3/queue"; // Always use relative path
+      const prefetchPromises = queueIds.map((videoId) =>
+        this.resolveStreamUrl(videoId, false, { preferLocal: true })
+          .then((url) => {
+            this.upcomingStreamUrls.set(videoId, url);
+            return { videoId, url };
+          })
+          .catch(() => null)
+      );
 
-      const queueRes = await fetch(queueEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoIds: queueIds }),
-      });
-
-      if (queueRes.ok) {
-        const payload = (await queueRes.json()) as {
-          results?: Array<{ videoId: string; ok: boolean; link?: string }>;
-        };
-
-        for (const item of payload.results ?? []) {
-          if (item.ok && item.videoId && item.link) {
-            this.upcomingStreamUrls.set(item.videoId, item.link);
-            this.streamUrlCache.set(item.videoId, {
-              streamUrl: item.link,
-              expiresAt: Date.now() + STREAM_URL_CACHE_TTL_MS,
-            });
-          }
-        }
-      } else {
-        // Fall back to individual resolution if queue endpoint fails.
-        const resolvePromises = tracksToPreload.map((track) =>
-          this.resolveStreamUrl(track.videoId)
-            .then((url) => {
-              this.upcomingStreamUrls.set(track.videoId, url);
-              return { videoId: track.videoId, url };
-            })
-            .catch(() => null)
-        );
-
-        await Promise.allSettled(resolvePromises);
-      }
+      await Promise.allSettled(prefetchPromises);
 
       // Start periodic refresh of upcoming URLs to keep them fresh
       this.startUrlRefreshTimer();
@@ -176,6 +152,9 @@ class AudioEngine {
 
     // Use any pre-resolved URL (respects TTL); fall back to a fresh API fetch
     let streamUrl = this.getResolvedUrl(track.videoId);
+    if (!streamUrl && this.shouldUseDownloadFlow()) {
+      streamUrl = await mobileMediaCache.getCachedSrc(track.videoId);
+    }
     if (!streamUrl) {
       streamUrl = await this.resolveStreamUrl(track.videoId);
     }
@@ -555,11 +534,17 @@ class AudioEngine {
     if (!this.nextTrack) return;
 
     if (!this.nextStreamUrl) {
-      this.nextStreamUrl = await this.resolveStreamUrl(this.nextTrack.videoId);
+      this.nextStreamUrl = await this.resolveStreamUrl(this.nextTrack.videoId, false, {
+        preferLocal: this.shouldUseDownloadFlow(),
+      });
     }
 
     if (this.preloadRequested.has(this.nextTrack.videoId)) return;
     this.preloadRequested.add(this.nextTrack.videoId);
+
+    if (this.nextStreamUrl.startsWith("blob:")) {
+      return;
+    }
 
     try {
       await fetch(this.nextStreamUrl, {
@@ -571,10 +556,38 @@ class AudioEngine {
     }
   }
 
-  private async resolveStreamUrl(videoId: string, forceRefresh = false): Promise<string> {
+  private async resolveStreamUrl(
+    videoId: string,
+    forceRefresh = false,
+    options: { preferLocal?: boolean } = {}
+  ): Promise<string> {
     const cached = this.streamUrlCache.get(videoId);
     if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
       return cached.streamUrl;
+    }
+
+    if (this.shouldUseDownloadFlow()) {
+      const cachedLocal = await mobileMediaCache.getCachedSrc(videoId);
+      if (cachedLocal) {
+        this.streamUrlCache.set(videoId, {
+          streamUrl: cachedLocal,
+          expiresAt: Date.now() + STREAM_URL_CACHE_TTL_MS,
+        });
+        return cachedLocal;
+      }
+    }
+
+    if (this.shouldUseDownloadFlow() && options.preferLocal) {
+      try {
+        const localUrl = await mobileMediaCache.prefetchTrack(videoId);
+        this.streamUrlCache.set(videoId, {
+          streamUrl: localUrl,
+          expiresAt: Date.now() + STREAM_URL_CACHE_TTL_MS,
+        });
+        return localUrl;
+      } catch {
+        // Fall through to remote URL resolution.
+      }
     }
 
     const flow = this.shouldUseDownloadFlow() ? "cache" : "direct";
