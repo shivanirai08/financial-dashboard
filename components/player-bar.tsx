@@ -148,6 +148,8 @@ export function PlayerBar() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playbackToggleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const warmedMp3IdsRef = useRef<Set<string>>(new Set());
+  const lastQueueWarmKeyRef = useRef("");
   const playNextRef = useRef(playNext);
   playNextRef.current = playNext;
   // True while the tab is hidden — we block pause to keep audio going
@@ -395,6 +397,37 @@ export function PlayerBar() {
       // player may not be ready yet
     }
   }, [isPlaying, currentSong]);
+
+  // Temporary test hook: keep MP3 cache endpoints active even while playback uses YouTube iframe.
+  useEffect(() => {
+    const videoId = currentSong?.youtube_video_id;
+    if (!videoId) return;
+
+    if (!warmedMp3IdsRef.current.has(videoId)) {
+      warmedMp3IdsRef.current.add(videoId);
+      void fetch(`/api/youtube/audio-mp3/${videoId}?flow=cache`).catch(() => {
+        // Best effort prewarm only.
+      });
+    }
+
+    const upcomingVideoIds = queue
+      .slice(currentQueuePos + 1)
+      .map((songIndex) => songs[songIndex]?.youtube_video_id)
+      .filter((id): id is string => Boolean(id))
+      .slice(0, 2);
+
+    const queueWarmKey = upcomingVideoIds.join(",");
+    if (!queueWarmKey || queueWarmKey === lastQueueWarmKeyRef.current) return;
+    lastQueueWarmKeyRef.current = queueWarmKey;
+
+    void fetch("/api/youtube/audio-mp3/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoIds: upcomingVideoIds }),
+    }).catch(() => {
+      // Best effort prewarm only.
+    });
+  }, [currentSong?.youtube_video_id, queue, currentQueuePos, songs]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   function handleProgressClick(e: React.MouseEvent<HTMLDivElement>) {
