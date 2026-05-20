@@ -61,12 +61,26 @@ function formatTime(sec: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const STREAM_BACKEND_BASE =
+  process.env.NEXT_PUBLIC_STREAM_BACKEND_URL?.replace(/\/$/, "") ?? "";
+
+function getStreamEndpoint(videoId: string) {
+  if (STREAM_BACKEND_BASE) {
+    return `${STREAM_BACKEND_BASE}/api/stream/${videoId}`;
+  }
+  return `/api/stream/${videoId}`;
+}
+
 type AudioListener = {
   event: keyof HTMLMediaElementEventMap;
   handler: EventListener;
 };
 
 export function PlayerBar() {
+  const NATIVE_STREAM_DISABLED_KEY = "pulsebox_native_stream_disabled";
+  const NATIVE_STREAM_FAIL_COUNT_KEY = "pulsebox_native_stream_fail_count";
+  const NATIVE_STREAM_FAIL_THRESHOLD = 3;
+
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const {
@@ -205,6 +219,7 @@ export function PlayerBar() {
   const isLoadingVideoRef = useRef(false);
   const tabHiddenRef = useRef(false);
   const audioListenersRef = useRef<AudioListener[]>([]);
+  const nativeStreamDisabledRef = useRef(false);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -215,6 +230,13 @@ export function PlayerBar() {
     setMounted(true);
     // Ensure the audio element exists and is in the DOM from the first mount
     getPersistentAudio();
+
+    try {
+      nativeStreamDisabledRef.current =
+        window.sessionStorage.getItem(NATIVE_STREAM_DISABLED_KEY) === "1";
+    } catch {
+      nativeStreamDisabledRef.current = false;
+    }
   }, []);
 
   // ── Wire up module-level audio callbacks ──────────────────────────────────
@@ -359,9 +381,38 @@ export function PlayerBar() {
 
     const abortController = new AbortController();
 
+    function markNativeStreamFailure() {
+      try {
+        const nextFailCount =
+          Number(window.sessionStorage.getItem(NATIVE_STREAM_FAIL_COUNT_KEY) ?? "0") + 1;
+        window.sessionStorage.setItem(NATIVE_STREAM_FAIL_COUNT_KEY, String(nextFailCount));
+        if (nextFailCount >= NATIVE_STREAM_FAIL_THRESHOLD) {
+          window.sessionStorage.setItem(NATIVE_STREAM_DISABLED_KEY, "1");
+          nativeStreamDisabledRef.current = true;
+          console.warn("[player] Native stream disabled for this session after repeated failures");
+        }
+      } catch {
+        // ignore storage failures
+      }
+    }
+
+    function clearNativeStreamFailures() {
+      try {
+        window.sessionStorage.removeItem(NATIVE_STREAM_FAIL_COUNT_KEY);
+      } catch {
+        // ignore storage failures
+      }
+    }
+
     async function loadNativeAudio() {
       try {
-        const res = await fetch(`/api/stream/${videoId}`, {
+        if (nativeStreamDisabledRef.current) {
+          fallbackToIframe();
+          return;
+        }
+
+        const streamEndpoint = getStreamEndpoint(videoId);
+        const res = await fetch(streamEndpoint, {
           signal: abortController.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -383,7 +434,7 @@ export function PlayerBar() {
         // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
         // audio.load() resets the user-gesture unlock. Setting src directly
         // preserves the gesture token from the first user tap.
-        audio.src = `/api/stream/${videoId}`;
+        audio.src = streamEndpoint;
         // audio.load() — ← INTENTIONALLY REMOVED — this was the root cause
 
         const onPlay = () => {
@@ -454,6 +505,7 @@ export function PlayerBar() {
         audioListenersRef.current = listeners;
 
         await audio.play();
+        clearNativeStreamFailures();
         setAudioLoading(false);
 
         // If video panel is showing, load the video muted for visuals
@@ -464,6 +516,7 @@ export function PlayerBar() {
 
       } catch (err) {
         if (abortController.signal.aborted) return;
+        markNativeStreamFailure();
         console.warn("[player] Native audio fetch failed, falling back to iframe:", err);
         fallbackToIframe();
       }
