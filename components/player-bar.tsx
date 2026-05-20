@@ -361,12 +361,11 @@ export function PlayerBar() {
 
     async function loadNativeAudio() {
       try {
-        const res = await fetch(`/api/youtube/audio/${videoId}`, {
+        const res = await fetch(`/api/stream/${videoId}`, {
           signal: abortController.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!data.url) throw new Error("No URL returned");
+        if (!res.body) throw new Error("No stream body");
 
         if (abortController.signal.aborted) return;
         if (usePlayerStore.getState().currentSong?.id !== songId) return;
@@ -384,11 +383,9 @@ export function PlayerBar() {
         // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
         // audio.load() resets the user-gesture unlock. Setting src directly
         // preserves the gesture token from the first user tap.
-        audio.src = data.url;
+        audio.src = `/api/stream/${videoId}`;
         // audio.load() — ← INTENTIONALLY REMOVED — this was the root cause
 
-        // Remove any previous event listeners to avoid duplicates.
-        // We do this by cloning the function refs (see cleanup below).
         const onPlay = () => {
           if (usePlayerStore.getState().currentSong?.id === songId) {
             setIsPlaying(true);
@@ -415,7 +412,7 @@ export function PlayerBar() {
           if (dur > 0 && isFinite(dur)) {
             setProgress((cur / dur) * 100);
             setDuration(dur);
-            // Update position state for seekbar on lock screen
+            // Update position state for lock screen seekbar (critical for background)
             if ("mediaSession" in navigator) {
               try {
                 navigator.mediaSession.setPositionState({
@@ -432,8 +429,9 @@ export function PlayerBar() {
             setDuration(audio.duration);
           }
         };
-        const onError = () => {
-          console.warn("[player] Native audio error, falling back to iframe");
+        const onError = (e: Event) => {
+          const audio = e.target as HTMLAudioElement;
+          console.warn(`[player] Audio error: ${audio.error?.message || 'unknown'}, trying fallback`);
           usingNativeAudioRef.current = false;
           for (const { event, handler } of audioListenersRef.current) {
             audio.removeEventListener(event, handler);
