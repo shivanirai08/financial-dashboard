@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Music, Plus, X, Loader2, Heart } from "lucide-react";
-import { InstallPrompt } from "@/components/install-prompt";
 
 type SongPreview = { name: string; artist: string };
 type PreviewData = { playlistName: string; totalSongs: number; songs: SongPreview[] };
@@ -146,9 +145,6 @@ export function HomeClient({ playlists, likedCount }: Props) {
             Paste any public Spotify playlist URL. We match every track to a YouTube video
             so you can play it straight from the browser.
           </p>
-          <div className="mx-auto mt-5 max-w-lg text-left">
-            <InstallPrompt />
-          </div>
         </header>
 
         {/* ── Spotify Import ── */}

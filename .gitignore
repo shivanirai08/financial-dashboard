@@ -2,7 +2,6 @@
 
 # dependencies
 /node_modules
-/backend/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -40,8 +39,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-.env
-yt-dlp
-yt-cookies.txt
-*.cookies.txt

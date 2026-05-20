@@ -8,9 +8,8 @@ export default function manifest(): MetadataRoute.Manifest {
       "Import Spotify playlists, match tracks to YouTube, and play your library in an installable web app.",
     start_url: "/",
     display: "standalone",
-    categories: ["music", "entertainment"],
-    background_color: "#000000",
-    theme_color: "#000000",
+    background_color: "#07111f",
+    theme_color: "#07111f",
     icons: [
       {
         src: "/icon.svg",

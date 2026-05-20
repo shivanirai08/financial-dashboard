@@ -20,12 +20,8 @@ import {
   Minimize2,
   ChevronUp,
   ChevronDown,
-  Loader2,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
-import { audioEngine } from "@/lib/audio-engine";
-
-// Playback is managed by lib/audio-engine.ts so it survives React component churn.
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -62,6 +58,7 @@ export function PlayerBar() {
   const videoPanelRef = useRef<HTMLDivElement>(null);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
+  // Position is stored as { right, bottom } offsets from viewport edges
   const [panelPos, setPanelPos] = useState({ right: 20, bottom: 88 });
   const dragState = useRef<{
     dragging: boolean;
@@ -72,6 +69,7 @@ export function PlayerBar() {
   }>({ dragging: false, startX: 0, startY: 0, startRight: 20, startBottom: 88 });
 
   function handleDragStart(e: React.PointerEvent<HTMLDivElement>) {
+    // Only drag from the header bar, not from buttons inside it
     if ((e.target as HTMLElement).closest("button")) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragState.current = {
@@ -88,40 +86,27 @@ export function PlayerBar() {
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
     const panelW = VIDEO_WIDTHS[videoSize];
-    const panelH = Math.round(panelW * 0.5625) + 36;
-    const newRight = Math.max(
-      0,
-      Math.min(window.innerWidth - panelW, dragState.current.startRight - dx)
-    );
-    const newBottom = Math.max(
-      72,
-      Math.min(window.innerHeight - panelH, dragState.current.startBottom + dy)
-    );
+    const panelH = Math.round(panelW * 0.5625) + 36; // aspect + header
+    const newRight = Math.max(0, Math.min(window.innerWidth - panelW, dragState.current.startRight - dx));
+    const newBottom = Math.max(72, Math.min(window.innerHeight - panelH, dragState.current.startBottom + dy));
     setPanelPos({ right: newRight, bottom: newBottom });
   }
 
   function handleDragEnd() {
     dragState.current.dragging = false;
   }
-
-  const VIDEO_WIDTHS: Record<"sm" | "md" | "lg", number> = {
-    sm: 320,
-    md: 500,
-    lg: 700,
-  };
-  const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = {
-    sm: "md",
-    md: "lg",
-    lg: "sm",
-  };
+  const VIDEO_WIDTHS: Record<"sm" | "md" | "lg", number> = { sm: 320, md: 500, lg: 700 };
+  const VIDEO_SIZE_NEXT: Record<"sm" | "md" | "lg", "sm" | "md" | "lg"> = { sm: "md", md: "lg", lg: "sm" };
   const [videoSize, setVideoSize] = useState<"sm" | "md" | "lg">("sm");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showNowPlaying, setShowNowPlaying] = useState(false);
 
+  // Close now-playing drawer when song stops
   useEffect(() => {
     if (!currentSong) setShowNowPlaying(false);
   }, [currentSong]);
 
+  // Close now-playing drawer on ESC
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape" && showNowPlaying) setShowNowPlaying(false);
@@ -130,6 +115,7 @@ export function PlayerBar() {
     return () => document.removeEventListener("keydown", onKey);
   }, [showNowPlaying]);
 
+  // When size changes, clamp position so the panel stays on-screen
   useEffect(() => {
     const panelW = VIDEO_WIDTHS[videoSize];
     const panelH = Math.round(panelW * 0.5625) + 36;
@@ -137,9 +123,10 @@ export function PlayerBar() {
       right: Math.max(0, Math.min(window.innerWidth - panelW, p.right)),
       bottom: Math.max(72, Math.min(window.innerHeight - panelH, p.bottom)),
     }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoSize]);
 
+  // Track native fullscreen state changes
   useEffect(() => {
     function handleFsChange() {
       setIsFullscreen(!!document.fullscreenElement);
@@ -156,110 +143,120 @@ export function PlayerBar() {
       document.exitFullscreen?.();
     }
   }
-
-  // ── Refs ──────────────────────────────────────────────────────────────────
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Stable refs for queue callbacks — we point MediaSession handlers at these
-  // so we never need to re-register the handlers when queue/index changes.
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const playNextRef = useRef(playNext);
-  const playPrevRef = useRef(playPrev);
   playNextRef.current = playNext;
-  playPrevRef.current = playPrev;
-
-  // Whether native <audio> is handling playback (vs iframe fallback)
-  const usingNativeAudioRef = useRef(false);
-  const isLoadingVideoRef = useRef(false);
+  // True while the tab is hidden — we block pause to keep audio going
   const tabHiddenRef = useRef(false);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
-  const [audioLoading, setAudioLoading] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    audioEngine.init();
   }, []);
 
-  // Keep engine callbacks in sync with the latest store callbacks.
-  useEffect(() => {
-    audioEngine.setCallbacks({
-      onPlayStateChange: (playing) => setIsPlaying(playing),
-      onTimeUpdate: (currentTimeValue, durationValue) => {
-        if (!durationValue || !isFinite(durationValue) || durationValue <= 0) {
-          setProgress(0);
-          return;
-        }
+  const forceResumeIfNeeded = useCallback(() => {
+    const p = playerRef.current;
+    if (!p) return;
 
-        setDuration(durationValue);
-        setProgress((currentTimeValue / durationValue) * 100);
+    const shouldPlay = usePlayerStore.getState().isPlaying;
+    if (!shouldPlay) return;
 
-        if ("mediaSession" in navigator) {
-          try {
-            navigator.mediaSession.setPositionState({
-              duration: durationValue,
-              playbackRate: 1,
-              position: Math.min(currentTimeValue, durationValue),
-            });
-          } catch {
-            // Older browsers can throw for this API.
-          }
-        }
-      },
-      onDuration: (durationValue) => setDuration(durationValue),
-      onNext: () => playNextRef.current(),
-      onPrev: () => playPrevRef.current(),
-      onEnded: () => {
-        setProgress(0);
-        playNextRef.current();
-      },
-      onError: () => {
-        usingNativeAudioRef.current = false;
-        setAudioLoading(false);
-      },
-    });
-  }, [setIsPlaying]);
+    const state = p.getPlayerState?.();
+    if (state === 2 || state === -1) {
+      try {
+        p.playVideo();
+      } catch {
+        // Browser media policies can block this; ignore and retry on next visibility/focus.
+      }
+    }
+  }, []);
 
-  // ── Visibility change ─────────────────────────────────────────────────────
+  const requestWakeLock = useCallback(async () => {
+    if (typeof window === "undefined" || document.hidden) return;
+
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> };
+    };
+    if (!nav.wakeLock) return;
+
+    try {
+      wakeLockRef.current = await nav.wakeLock.request("screen");
+    } catch {
+      // Unsupported, denied, or blocked by battery saver.
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (!wakeLockRef.current) return;
+    try {
+      await wakeLockRef.current.release();
+    } catch {
+      // ignore
+    } finally {
+      wakeLockRef.current = null;
+    }
+  }, []);
+
+  // ── Block pause when tab is hidden / screen locked ────────────────────────
   useEffect(() => {
     function handleVisibility() {
       tabHiddenRef.current = document.hidden;
+      if (!document.hidden) {
+        forceResumeIfNeeded();
+        void requestWakeLock();
+      }
     }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, []);
 
-  // ── YouTube IFrame API — VIDEO DISPLAY ONLY ───────────────────────────────
+    function handlePageShow() {
+      forceResumeIfNeeded();
+      void requestWakeLock();
+    }
+
+    function handleFocus() {
+      forceResumeIfNeeded();
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [forceResumeIfNeeded, requestWakeLock]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (isPlaying && currentSong) {
+      void requestWakeLock();
+    } else {
+      void releaseWakeLock();
+    }
+  }, [mounted, isPlaying, currentSong, requestWakeLock, releaseWakeLock]);
+
+  useEffect(() => {
+    return () => {
+      void releaseWakeLock();
+    };
+  }, [releaseWakeLock]);
+
+  // ── YouTube IFrame API bootstrap ──────────────────────────────────────────
   const initPlayer = useCallback(() => {
     if (!containerRef.current || playerRef.current) return;
 
     playerRef.current = new window.YT.Player(containerRef.current, {
       videoId: "",
-      playerVars: {
-        autoplay: 0,
-        controls: 0,
-        rel: 0,
-        modestbranding: 1,
-        playsinline: 1,
-      },
+      playerVars: { autoplay: 1, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
       events: {
         onStateChange(event) {
-          // When native audio is active, iframe is visual-only — keep it muted
-          if (usingNativeAudioRef.current) {
-            try {
-              (playerRef.current as unknown as { mute: () => void })?.mute();
-            } catch { /* ignore */ }
-            return;
-          }
-          // Fallback mode: iframe handles audio (when native audio fails)
           if (event.data === 1) {
-            isLoadingVideoRef.current = false;
             setIsPlaying(true);
-            if ("mediaSession" in navigator) {
-              try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
-            }
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
                 const p = playerRef.current;
@@ -268,19 +265,17 @@ export function PlayerBar() {
                 const dur = p.getDuration?.() ?? 0;
                 setProgress(dur > 0 ? (cur / dur) * 100 : 0);
                 setDuration(dur);
-                if ("mediaSession" in navigator && dur > 0) {
-                  try {
-                    navigator.mediaSession.setPositionState({
-                      duration: dur,
-                      playbackRate: 1,
-                      position: Math.min(cur, dur),
-                    });
-                  } catch { /* ignore */ }
-                }
               }, 500);
             }
           } else if (event.data === 2) {
-            if (!tabHiddenRef.current) setIsPlaying(false);
+            // Only reflect PAUSED state when the tab is actually visible
+            // (hidden tab browsers silently pause YouTube — we ignore it)
+            if (!tabHiddenRef.current) {
+              setIsPlaying(false);
+            } else {
+              // Tab is hidden — force resume immediately
+              try { playerRef.current?.playVideo(); } catch { /* ignore */ }
+            }
           } else if (event.data === 0) {
             if (intervalRef.current) {
               clearInterval(intervalRef.current);
@@ -296,6 +291,7 @@ export function PlayerBar() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
     if (window.YT?.Player) {
       initPlayer();
     } else {
@@ -306,141 +302,98 @@ export function PlayerBar() {
         document.head.appendChild(tag);
       }
     }
+
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [initPlayer]);
 
-  // ── MediaSession playback state sync ─────────────────────────────────────
-  // IMPORTANT: We only sync playbackState here, NOT metadata and NOT handlers.
-  // Metadata is set synchronously in the song-load effect below.
-  // Handlers are registered once by the singleton audio engine.
   useEffect(() => {
-    if (!mounted || !("mediaSession" in navigator)) return;
+    if (!mounted || typeof window === "undefined") return;
+    if (!("mediaSession" in navigator)) return;
+
+    const mediaSession = navigator.mediaSession;
+
     if (currentSong) {
-      try {
-        navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
-      } catch { /* ignore */ }
+      mediaSession.metadata = new MediaMetadata({
+        title: currentSong.title,
+        artist: currentSong.artist,
+        album: "Pulsebox",
+        artwork: currentSong.thumbnail
+          ? [
+              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
+              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
+            ]
+          : [],
+      });
+      mediaSession.playbackState = isPlaying ? "playing" : "paused";
     } else {
-      try {
-        navigator.mediaSession.playbackState = "none";
-      } catch { /* ignore */ }
+      mediaSession.metadata = null;
+      mediaSession.playbackState = "none";
     }
-  }, [mounted, isPlaying, currentSong]);
 
-  function getNextSongInQueue() {
-    if (!queue.length || currentQueuePos < 0) return null;
-    const nextPos = currentQueuePos + 1;
-    if (nextPos >= queue.length) return null;
-    return songs[queue[nextPos]] ?? null;
-  }
+    const safeSetActionHandler = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null
+    ) => {
+      try {
+        mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Some browsers support MediaSession without all action handlers.
+      }
+    };
 
-  useEffect(() => {
-    audioEngine.setNextTrack(getNextSongInQueue());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentQueuePos, queue, songs]);
+    safeSetActionHandler("play", () => setIsPlaying(true));
+    safeSetActionHandler("pause", () => setIsPlaying(false));
+    safeSetActionHandler("previoustrack", () => playPrev());
+    safeSetActionHandler("nexttrack", () => playNext());
 
-  // ── Load new song when currentSong changes ────────────────────────────────
+    return () => {
+      safeSetActionHandler("play", null);
+      safeSetActionHandler("pause", null);
+      safeSetActionHandler("previoustrack", null);
+      safeSetActionHandler("nexttrack", null);
+    };
+  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
+
+  // ── Load new video when currentSong changes ───────────────────────────────
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
-    const videoId = currentSong.youtube_video_id;
-    let cancelled = false;
-
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
-    setAudioLoading(true);
-
-    function fallbackToIframe() {
-      usingNativeAudioRef.current = false;
-      setAudioLoading(false);
-      if (playerRef.current) {
-        isLoadingVideoRef.current = true;
-        (playerRef.current as unknown as { unMute: () => void }).unMute();
-        playerRef.current.loadVideoById(videoId);
-      }
-    }
-
-    audioEngine.setNextTrack(getNextSongInQueue());
-    void audioEngine
-      .playSong(currentSong)
-      .then(() => {
-        if (cancelled) return;
-        usingNativeAudioRef.current = true;
-        setAudioLoading(false);
-
-        if (usePlayerStore.getState().showVideo && playerRef.current) {
-          (playerRef.current as unknown as { mute: () => void }).mute();
-          playerRef.current.loadVideoById(videoId);
-        }
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        console.warn("[player] Native audio failed, falling back to iframe:", err);
-        fallbackToIframe();
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSong?.youtube_video_id, currentSong?.id]);
-
-  // When video panel is toggled on while native audio plays, load video muted
-  useEffect(() => {
-    if (!showVideo || !currentSong?.youtube_video_id || !playerRef.current) return;
-    if (usingNativeAudioRef.current) {
-      (playerRef.current as unknown as { mute: () => void }).mute();
+    if (playerRef.current) {
       playerRef.current.loadVideoById(currentSong.youtube_video_id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showVideo]);
+  }, [currentSong?.youtube_video_id, currentSong?.id]);
 
   useEffect(() => {
     setLiked(currentSong?.liked ?? false);
   }, [currentSong?.liked]);
 
-  // Sync play/pause state from store → audio element
   useEffect(() => {
-    if (!currentSong) return;
-    if (usingNativeAudioRef.current) {
-      void audioEngine.syncPlaybackState(isPlaying).catch(() => {
-        // Ignore transient autoplay/state errors.
-      });
-    } else {
-      if (!playerRef.current) return;
-      if (!isPlaying && tabHiddenRef.current) return;
-      try {
-        if (isPlaying) playerRef.current.playVideo();
-        else playerRef.current.pauseVideo();
-      } catch { /* player may not be ready */ }
+    if (!playerRef.current || !currentSong) return;
+    // Never forcibly pause while the tab is hidden
+    if (!isPlaying && tabHiddenRef.current) return;
+    try {
+      if (isPlaying) {
+        playerRef.current.playVideo();
+      } else {
+        playerRef.current.pauseVideo();
+      }
+    } catch {
+      // player may not be ready yet
     }
   }, [isPlaying, currentSong]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
-
   function handleProgressClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (duration === 0) return;
+    if (!playerRef.current || duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const seekTime = pct * duration;
-
-    if (usingNativeAudioRef.current) {
-      audioEngine.seekTo(seekTime);
-    } else if (playerRef.current) {
-      playerRef.current.seekTo(seekTime, true);
-    }
+    playerRef.current.seekTo(pct * duration, true);
     setProgress(pct * 100);
-
-    if ("mediaSession" in navigator) {
-      try {
-        navigator.mediaSession.setPositionState({
-          duration,
-          playbackRate: 1,
-          position: Math.min(seekTime, duration),
-        });
-      } catch { /* ignore */ }
-    }
   }
 
   async function handleLike() {
@@ -449,9 +402,7 @@ export function PlayerBar() {
     setLiked(newLiked);
     updateLike(currentSong.id, newLiked);
     try {
-      const res = await fetch(`/api/songs/${currentSong.id}/like`, {
-        method: "PATCH",
-      });
+      const res = await fetch(`/api/songs/${currentSong.id}/like`, { method: "PATCH" });
       if (!res.ok) throw new Error("Request failed");
       router.refresh();
     } catch {
@@ -460,24 +411,9 @@ export function PlayerBar() {
     }
   }
 
-  function handlePlayToggle() {
-    void audioEngine.primeOnGesture();
-    setIsPlaying(!isPlaying);
-  }
-
-  // Also prime on skip buttons — they trigger playback too
-  function handleNext() {
-    void audioEngine.primeOnGesture();
-    playNext();
-  }
-
-  function handlePrev() {
-    void audioEngine.primeOnGesture();
-    playPrev();
-  }
-
   const currentTime = duration > 0 ? (progress / 100) * duration : 0;
 
+  // Prevent SSR/client mismatch when persisted player state exists only on client.
   if (!mounted) return null;
 
   return (
@@ -487,11 +423,10 @@ export function PlayerBar() {
       {/* ── Now-playing full-screen drawer (mobile only) ──────────────── */}
       <div
         className={`fixed inset-0 z-[55] flex flex-col overflow-hidden bg-gradient-to-b from-[#0d1a2b] to-[#04070d] sm:hidden transition-transform duration-300 ease-out ${
-          showNowPlaying && currentSong
-            ? "translate-y-0"
-            : "translate-y-full pointer-events-none"
+          showNowPlaying && currentSong ? "translate-y-0" : "translate-y-full pointer-events-none"
         }`}
       >
+        {/* Drag-handle + header */}
         <div className="flex flex-col items-center px-5 pt-3">
           <button
             onClick={() => setShowNowPlaying(false)}
@@ -501,9 +436,7 @@ export function PlayerBar() {
             <div className="h-1 w-12 rounded-full bg-white/25" />
           </button>
           <div className="flex w-full items-center justify-between py-1">
-            <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
-              Now Playing
-            </p>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Now Playing</p>
             <button
               onClick={() => setShowNowPlaying(false)}
               className="flex h-7 w-7 items-center justify-center rounded-full text-slate-400 hover:text-white"
@@ -514,14 +447,11 @@ export function PlayerBar() {
         </div>
 
         <div className="flex flex-1 flex-col justify-between overflow-y-auto px-6 pb-8">
+          {/* Artwork */}
           <div className="mt-4 aspect-square w-full overflow-hidden rounded-2xl bg-slate-800 shadow-[0_24px_56px_rgba(0,0,0,0.7)]">
             {currentSong?.thumbnail ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={currentSong.thumbnail}
-                alt=""
-                className="h-full w-full object-cover"
-              />
+              <img src={currentSong.thumbnail} alt="" className="h-full w-full object-cover" />
             ) : (
               <div className="flex h-full w-full items-center justify-center">
                 <Music size={64} className="text-slate-600" />
@@ -529,14 +459,13 @@ export function PlayerBar() {
             )}
           </div>
 
+          {/* Song info + like */}
           <div className="mt-6 flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[1.15rem] font-bold leading-snug text-white">
                 {currentSong?.title ?? "—"}
               </p>
-              <p className="mt-0.5 text-sm text-slate-400">
-                {currentSong?.artist ?? ""}
-              </p>
+              <p className="mt-0.5 text-sm text-slate-400">{currentSong?.artist ?? ""}</p>
             </div>
             <button
               onClick={handleLike}
@@ -548,6 +477,7 @@ export function PlayerBar() {
             </button>
           </div>
 
+          {/* Progress scrubber */}
           <div className="mt-5">
             <div
               className="h-1.5 w-full cursor-pointer rounded-full bg-white/15"
@@ -564,6 +494,7 @@ export function PlayerBar() {
             </div>
           </div>
 
+          {/* Main playback controls */}
           <div className="mt-3 flex items-center justify-between">
             <button
               onClick={toggleShuffle}
@@ -574,26 +505,19 @@ export function PlayerBar() {
               <Shuffle size={22} />
             </button>
             <button
-              onClick={handlePrev}
+              onClick={playPrev}
               className="flex h-12 w-12 items-center justify-center text-white"
             >
               <SkipBack size={30} />
             </button>
             <button
-              onClick={handlePlayToggle}
-              disabled={audioLoading}
-              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95 disabled:opacity-60"
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
-              {audioLoading ? (
-                <Loader2 size={22} className="animate-spin" />
-              ) : isPlaying ? (
-                <Pause size={26} />
-              ) : (
-                <Play size={26} className="ml-1" />
-              )}
+              {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
             </button>
             <button
-              onClick={handleNext}
+              onClick={playNext}
               className="flex h-12 w-12 items-center justify-center text-white"
             >
               <SkipForward size={30} />
@@ -608,12 +532,10 @@ export function PlayerBar() {
             </button>
           </div>
 
+          {/* Extra controls row */}
           <div className="mt-5 flex items-center justify-between gap-3">
             <button
-              onClick={() => {
-                setShowNowPlaying(false);
-                toggleQueue();
-              }}
+              onClick={() => { setShowNowPlaying(false); toggleQueue(); }}
               className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 showQueue
                   ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -624,10 +546,7 @@ export function PlayerBar() {
               Queue
             </button>
             <button
-              onClick={() => {
-                setShowNowPlaying(false);
-                toggleVideo();
-              }}
+              onClick={() => { setShowNowPlaying(false); toggleVideo(); }}
               className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 showVideo
                   ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -646,24 +565,18 @@ export function PlayerBar() {
         ref={videoPanelRef}
         className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl"
         style={{
-          width: Math.min(
-            VIDEO_WIDTHS[videoSize],
-            typeof window !== "undefined"
-              ? window.innerWidth - 8
-              : VIDEO_WIDTHS[videoSize]
-          ),
-          bottom:
-            showVideo && currentSong
-              ? panelPos.bottom
-              : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
+          width: Math.min(VIDEO_WIDTHS[videoSize], typeof window !== "undefined" ? window.innerWidth - 8 : VIDEO_WIDTHS[videoSize]),
+          bottom: showVideo && currentSong ? panelPos.bottom : -(VIDEO_WIDTHS[videoSize] * 0.65 + 60),
           right: isFullscreen ? 0 : Math.max(4, panelPos.right),
           opacity: showVideo && currentSong ? 1 : 0,
           pointerEvents: showVideo && currentSong ? "auto" : "none",
+          // No CSS transition on position — drag must be instant
           transition: "opacity 0.2s, bottom 0.2s",
           userSelect: "none",
           touchAction: "none",
         }}
       >
+        {/* Header — grab here to drag */}
         <div
           className="flex cursor-grab items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm active:cursor-grabbing"
           onPointerDown={handleDragStart}
@@ -674,6 +587,7 @@ export function PlayerBar() {
           <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-300">
             {currentSong?.title ?? ""}
           </p>
+          {/* Cycle size */}
           <button
             onClick={() => setVideoSize((s) => VIDEO_SIZE_NEXT[s])}
             title={`Size: ${videoSize.toUpperCase()} — click to change`}
@@ -681,6 +595,7 @@ export function PlayerBar() {
           >
             {videoSize === "lg" ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
           </button>
+          {/* Fullscreen */}
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
@@ -688,6 +603,7 @@ export function PlayerBar() {
           >
             {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
+          {/* Close */}
           <button
             onClick={toggleVideo}
             title="Hide video"
@@ -699,20 +615,17 @@ export function PlayerBar() {
         <div ref={containerRef} className="aspect-video w-full" />
       </div>
 
-      {/* ── Queue panel ─────────────────────────────────────────────────── */}
+      {/* ── Queue panel — slides up above the player bar ─────────────── */}
       <div
         className={`fixed left-0 right-0 z-40 border-t border-white/8 bg-[#04070d]/97 backdrop-blur-2xl transition-all duration-300 ease-in-out ${
-          showQueue && currentSong
-            ? "opacity-100 translate-y-0"
-            : "opacity-0 translate-y-4 pointer-events-none"
+          showQueue && currentSong ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
         }`}
         style={{ bottom: 72 }}
       >
         <div className="mx-auto max-w-2xl">
           <div className="flex items-center justify-between px-5 py-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Queue · {queue.filter((i) => songs[i]?.youtube_video_id).length}{" "}
-              playable
+              Queue · {queue.filter((i) => songs[i]?.youtube_video_id).length} playable
             </p>
             <button
               onClick={toggleQueue}
@@ -725,13 +638,13 @@ export function PlayerBar() {
           <div className="max-h-64 overflow-y-auto pb-3">
             {queue.map((songIndex, queueIdx) => {
               const s = songs[songIndex];
+              // Only show songs that have a YouTube match
               if (!s || !s.youtube_video_id) return null;
               const isCurrent = queueIdx === currentQueuePos;
               return (
                 <button
                   key={s.id}
                   onClick={() => {
-                    void audioEngine.primeOnGesture();
                     playAtIndex(songIndex);
                     toggleQueue();
                   }}
@@ -742,11 +655,7 @@ export function PlayerBar() {
                   <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg bg-slate-800">
                     {s.thumbnail ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={s.thumbnail}
-                        alt=""
-                        className="h-full w-full object-cover"
-                      />
+                      <img src={s.thumbnail} alt="" className="h-full w-full object-cover" />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center">
                         <Music size={14} className="text-slate-600" />
@@ -781,6 +690,7 @@ export function PlayerBar() {
           currentSong ? "translate-y-0" : "translate-y-full"
         }`}
       >
+        {/* Seekable progress bar */}
         <div
           className="group/seek h-1 w-full cursor-pointer bg-white/10 transition-all hover:h-1.5"
           onClick={handleProgressClick}
@@ -792,6 +702,7 @@ export function PlayerBar() {
         </div>
 
         <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4">
+          {/* Song info — tap on mobile opens now-playing drawer */}
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
               onClick={() => setShowNowPlaying(true)}
@@ -815,9 +726,7 @@ export function PlayerBar() {
                 <p className="truncate text-xs font-semibold leading-tight text-white sm:text-sm">
                   {currentSong?.title ?? "—"}
                 </p>
-                <p className="truncate text-[11px] text-slate-400 sm:text-xs">
-                  {currentSong?.artist ?? ""}
-                </p>
+                <p className="truncate text-[11px] text-slate-400 sm:text-xs">{currentSong?.artist ?? ""}</p>
               </div>
             </button>
             <button
@@ -831,6 +740,7 @@ export function PlayerBar() {
             </button>
           </div>
 
+          {/* Playback controls */}
           <div className="flex items-center gap-0.5 sm:gap-1">
             <button
               onClick={toggleShuffle}
@@ -842,28 +752,21 @@ export function PlayerBar() {
               <Shuffle size={16} />
             </button>
             <button
-              onClick={handlePrev}
+              onClick={playPrev}
               title="Previous"
               className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
               <SkipBack size={18} />
             </button>
             <button
-              onClick={handlePlayToggle}
-              title={audioLoading ? "Loading…" : isPlaying ? "Pause" : "Play"}
-              disabled={audioLoading}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10 disabled:opacity-60"
+              onClick={() => setIsPlaying(!isPlaying)}
+              title={isPlaying ? "Pause" : "Play"}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
-              {audioLoading ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : isPlaying ? (
-                <Pause size={17} />
-              ) : (
-                <Play size={17} className="ml-0.5" />
-              )}
+              {isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
             </button>
             <button
-              onClick={handleNext}
+              onClick={playNext}
               title="Next"
               className="flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10"
             >
@@ -873,15 +776,14 @@ export function PlayerBar() {
               onClick={cycleRepeat}
               title={`Repeat: ${repeatMode}`}
               className={`hidden h-8 w-8 items-center justify-center rounded-lg transition-colors sm:flex ${
-                repeatMode !== "off"
-                  ? "text-cyan-400"
-                  : "text-slate-500 hover:text-white"
+                repeatMode !== "off" ? "text-cyan-400" : "text-slate-500 hover:text-white"
               }`}
             >
               {repeatMode === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
             </button>
           </div>
 
+          {/* Right controls */}
           <div className="flex flex-1 items-center justify-end gap-1.5 sm:gap-2">
             <span className="hidden text-xs tabular-nums text-slate-500 sm:block">
               {formatTime(currentTime)} / {formatTime(duration)}
