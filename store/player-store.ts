@@ -8,6 +8,7 @@ type PlayerStore = {
   queue: number[];         // indices into songs[]
   currentQueuePos: number; // position within queue (-1 = nothing playing)
   isPlaying: boolean;
+  isLoadingTrack: boolean;
   showVideo: boolean;
   isShuffle: boolean;
   repeatMode: RepeatMode;
@@ -19,6 +20,7 @@ type PlayerStore = {
   playNext: () => void;
   playPrev: () => void;
   setIsPlaying: (v: boolean) => void;
+  setIsLoadingTrack: (v: boolean) => void;
   toggleShuffle: () => void;
   cycleRepeat: () => void;
   toggleVideo: () => void;
@@ -47,6 +49,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   queue: [],
   currentQueuePos: -1,
   isPlaying: false,
+  isLoadingTrack: false,
   showVideo: false,
   showQueue: false,
   isShuffle: false,
@@ -59,6 +62,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       queue: makeDefaultQueue(songs.length),
       currentQueuePos: -1,
       isPlaying: false,
+      isLoadingTrack: false,
       currentSong: null,
     });
   },
@@ -67,7 +71,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
     const { queue, songs } = get();
     let queuePos = queue.indexOf(songIndex);
     if (queuePos < 0) queuePos = 0;
-    set({ currentQueuePos: queuePos, isPlaying: true, currentSong: songs[songIndex] ?? null });
+    set({ currentQueuePos: queuePos, isPlaying: true, isLoadingTrack: true, currentSong: songs[songIndex] ?? null });
   },
 
   playNext() {
@@ -83,25 +87,29 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
     const next = currentQueuePos + 1;
     if (next >= queue.length) {
       if (repeatMode === "all") {
-        set({ currentQueuePos: 0, currentSong: songs[queue[0]] ?? null, isPlaying: true });
+        set({ currentQueuePos: 0, currentSong: songs[queue[0]] ?? null, isPlaying: true, isLoadingTrack: true });
       } else {
         set({ isPlaying: false });
       }
       return;
     }
 
-    set({ currentQueuePos: next, currentSong: songs[queue[next]] ?? null, isPlaying: true });
+    set({ currentQueuePos: next, currentSong: songs[queue[next]] ?? null, isPlaying: true, isLoadingTrack: true });
   },
 
   playPrev() {
     const { queue, currentQueuePos, songs } = get();
     if (queue.length === 0) return;
     const prev = Math.max(0, currentQueuePos - 1);
-    set({ currentQueuePos: prev, currentSong: songs[queue[prev]] ?? null, isPlaying: true });
+    set({ currentQueuePos: prev, currentSong: songs[queue[prev]] ?? null, isPlaying: true, isLoadingTrack: true });
   },
 
   setIsPlaying(v) {
     set({ isPlaying: v });
+  },
+
+  setIsLoadingTrack(v) {
+    set({ isLoadingTrack: v });
   },
 
   toggleShuffle() {

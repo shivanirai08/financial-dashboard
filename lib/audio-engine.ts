@@ -31,10 +31,15 @@ class AudioEngine {
   private streamUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
   private preloadRequested = new Set<string>();
   private mediaSessionInitialized = false;
+  private visibilityHandlerAttached = false;
   private gestureUnlocked = false;
   private upcomingTracks: EngineTrack[] = [];
   private upcomingStreamUrls = new Map<string, string>();
   private urlRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  // Monotonic counter — bumped on every playSong call so stale async continuations can self-abort
+  private playGeneration = 0;
+  // Throttle setPositionState calls in timeupdate (~every 1 s is enough for the notification)
+  private positionUpdateTick = 0;
 
   init(): void {
     this.ensureAudio();
@@ -138,37 +143,61 @@ class AudioEngine {
       throw new Error("Song has no YouTube video id");
     }
 
+    // Bump generation so any in-flight call for a previous song aborts itself
+    const generation = ++this.playGeneration;
+    // Reset position tick so timeupdate throttle doesn't skip the first updates
+    this.positionUpdateTick = 0;
+
     const track = this.toEngineTrack(song);
     const audio = this.ensureAudio();
     this.currentTrack = track;
 
-    let streamUrl: string;
-    
-    // Try to use pre-cached URL from queue preload first
-    const upcomingUrl = this.getUpcomingStreamUrl(track.videoId);
-    if (upcomingUrl) {
-      streamUrl = upcomingUrl;
-    } else if (this.nextTrack?.videoId === track.videoId && this.nextStreamUrl) {
-      // Fallback to next track preload
-      streamUrl = this.nextStreamUrl;
-    } else {
-      // Last resort: resolve now (happens on first play or if not in queue)
+    // Use any pre-resolved URL (respects TTL); fall back to a fresh API fetch
+    let streamUrl = this.getResolvedUrl(track.videoId);
+    if (!streamUrl) {
       streamUrl = await this.resolveStreamUrl(track.videoId);
     }
 
-    // Check if URL is still reachable (optional validation)
-    const reachable = await this.isPlayableStreamUrl(streamUrl);
-    if (!reachable) {
-      streamUrl = await this.resolveStreamUrl(track.videoId, true);
-    }
+    // Abort if a newer playSong was called while we were awaiting the URL
+    if (generation !== this.playGeneration) return;
 
-    if (audio.src !== streamUrl) {
-      audio.src = streamUrl;
-    }
+    // Always reassign src — clears any prior error state on the element
+    audio.src = streamUrl;
 
     this.updateMediaSession(track);
-    await audio.play();
-    await this.preResolveAndWarmNext();
+
+    try {
+      await audio.play();
+    } catch (err) {
+      if (generation !== this.playGeneration) return; // superseded — not our error
+      throw err;
+    }
+
+    if (generation !== this.playGeneration) return;
+    void this.preResolveAndWarmNext();
+  }
+
+  /**
+   * Return the best cached stream URL for a videoId without making a network request.
+   * Checks (in order): streamUrlCache (with TTL), nextStreamUrl, upcomingStreamUrls.
+   */
+  private getResolvedUrl(videoId: string): string | null {
+    // Primary — stream URL cache with TTL validation
+    const cached = this.streamUrlCache.get(videoId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.streamUrl;
+    }
+
+    // Secondary — next-track preload (recently resolved)
+    if (this.nextTrack?.videoId === videoId && this.nextStreamUrl) {
+      return this.nextStreamUrl;
+    }
+
+    // Tertiary — upcoming-streams map populated by preloadQueueTracks
+    const upcoming = this.upcomingStreamUrls.get(videoId);
+    if (upcoming) return upcoming;
+
+    return null;
   }
 
   async syncPlaybackState(shouldPlay: boolean): Promise<void> {
@@ -226,6 +255,7 @@ class AudioEngine {
     this.audio = element;
     this.attachEvents();
     this.initMediaSessionOnce();
+    this.initVisibilityHandler();
     return element;
   }
 
@@ -236,6 +266,11 @@ class AudioEngine {
       this.callbacks.onPlayStateChange?.(true);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "playing";
+        // Re-apply metadata on every play event — the only reliable hook on iOS
+        // after the page was backgrounded or the MediaSession session was reset.
+        if (this.currentTrack) {
+          this.updateMediaSession(this.currentTrack);
+        }
       }
     });
 
@@ -251,6 +286,8 @@ class AudioEngine {
       const duration = this.audio.duration;
       if (Number.isFinite(duration)) {
         this.callbacks.onDuration?.(duration);
+        // Tell Android Chrome the real duration so the notification seek bar is accurate
+        this.setPositionState(0, duration);
       }
     });
 
@@ -260,6 +297,12 @@ class AudioEngine {
       const currentTime = this.audio.currentTime;
       const duration = this.audio.duration;
       this.callbacks.onTimeUpdate?.(currentTime, duration);
+
+      // Throttle to ~every 1 s — Android notification needs periodic position updates
+      this.positionUpdateTick++;
+      if (this.positionUpdateTick % 4 === 0 && Number.isFinite(duration) && duration > 0) {
+        this.setPositionState(currentTime, duration);
+      }
 
       if (
         Number.isFinite(duration) &&
@@ -348,19 +391,62 @@ class AudioEngine {
   private updateMediaSession(track: EngineTrack): void {
     if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
 
-    navigator.mediaSession.playbackState = "playing";
-    navigator.mediaSession.metadata = new MediaMetadata({
+    const session = navigator.mediaSession;
+
+    // Step 1: Signal "nothing playing" — makes Android drop the current notification
+    // entirely before creating a fresh one for the new track. iOS also benefits.
+    session.playbackState = "none";
+    session.metadata = null;
+
+    // Step 2: Install new track metadata
+    session.metadata = new MediaMetadata({
       title: track.title,
       artist: track.artist ?? "Pulsebox",
       artwork: track.thumbnail
-        ? [
-            {
-              src: track.thumbnail,
-              sizes: "512x512",
-              type: "image/jpeg",
-            },
-          ]
+        ? [{ src: track.thumbnail, sizes: "512x512", type: "image/jpeg" }]
         : [],
+    });
+
+    // Step 3: Mark as playing
+    session.playbackState = "playing";
+
+    // Step 4: Reset the seek bar to 0 — required on Android Chrome for the
+    // notification to display a fresh progress bar for the new track.
+    this.setPositionState(0, 0);
+  }
+
+  private setPositionState(position: number, duration: number): void {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: duration > 0 ? duration : 0,
+        playbackRate: this.audio?.playbackRate ?? 1,
+        position: Math.min(position, duration > 0 ? duration : 0),
+      });
+    } catch {
+      // setPositionState is not universally supported; safe to ignore
+    }
+  }
+
+  private initVisibilityHandler(): void {
+    if (typeof document === "undefined") return;
+    if (this.visibilityHandlerAttached) return;
+    this.visibilityHandlerAttached = true;
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      if (!this.currentTrack) return;
+
+      // Re-apply MediaSession when the page becomes visible again (e.g. user
+      // returns from lock screen or app switcher). iOS/Android often drop the
+      // MediaSession metadata when the page was suspended.
+      this.updateMediaSession(this.currentTrack);
+
+      if (this.audio && !this.audio.paused) {
+        if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
+          navigator.mediaSession.playbackState = "playing";
+        }
+      }
     });
   }
 

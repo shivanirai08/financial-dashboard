@@ -41,6 +41,7 @@ export function PlayerBar() {
   const {
     currentSong,
     isPlaying,
+    isLoadingTrack,
     showVideo,
     showQueue,
     isShuffle,
@@ -52,6 +53,7 @@ export function PlayerBar() {
     playPrev,
     playAtIndex,
     setIsPlaying,
+    setIsLoadingTrack,
     toggleShuffle,
     cycleRepeat,
     toggleVideo,
@@ -158,7 +160,6 @@ export function PlayerBar() {
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
   const [isPlaybackLoading, setIsPlaybackLoading] = useState(false);
-  const [isTrackLoading, setIsTrackLoading] = useState(false);
   const [isIframeFallback, setIsIframeFallback] = useState(false);
   const [useDownloadFlowPlayback, setUseDownloadFlowPlayback] = useState(false);
 
@@ -237,7 +238,7 @@ export function PlayerBar() {
           if (event.data === 1) {
             setIsPlaying(true);
             clearPlaybackLoading();
-            setIsTrackLoading(false);
+            setIsLoadingTrack(false);
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
                 const p = playerRef.current;
@@ -291,7 +292,7 @@ export function PlayerBar() {
         setIsPlaying(playing);
         if (playing) {
           clearPlaybackLoading();
-          setIsTrackLoading(false);
+          setIsLoadingTrack(false);
         }
       },
       onTimeUpdate: (currentTime, totalDuration) => {
@@ -306,7 +307,7 @@ export function PlayerBar() {
         playNext();
       },
       onError: () => {
-        setIsTrackLoading(false);
+        setIsLoadingTrack(false);
         clearPlaybackLoading();
       },
       onNext: () => playNext(),
@@ -407,13 +408,12 @@ export function PlayerBar() {
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
-    setIsTrackLoading(true);
     setIsPlaybackLoading(true);
     playbackLoadingStartedAtRef.current = Date.now();
 
     if (!useDownloadFlowPlayback) {
       void fallbackToIframe(currentSong.youtube_video_id).catch(() => {
-        setIsTrackLoading(false);
+        setIsLoadingTrack(false);
         clearPlaybackLoading();
         setIsPlaying(false);
       });
@@ -426,7 +426,7 @@ export function PlayerBar() {
       .playSong(currentSong)
       .then(() => {
         setIsIframeFallback(false);
-        setIsTrackLoading(false);
+        setIsLoadingTrack(false);
         clearPlaybackLoading();
         useToastStore.getState().addToast("Song is playing successfully.");
       })
@@ -434,7 +434,7 @@ export function PlayerBar() {
         useToastStore.getState().addToast(`Error: ${error.message || "Failed to play song."}`);
 
         if (!currentSong.youtube_video_id) {
-          setIsTrackLoading(false);
+          setIsLoadingTrack(false);
           clearPlaybackLoading();
           setIsPlaying(false);
           return;
@@ -443,7 +443,7 @@ export function PlayerBar() {
         try {
           await fallbackToIframe(currentSong.youtube_video_id);
         } catch {
-          setIsTrackLoading(false);
+          setIsLoadingTrack(false);
           clearPlaybackLoading();
           setIsPlaying(false);
         }
@@ -649,10 +649,10 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayPauseToggle}
-              disabled={isPlaybackLoading || isTrackLoading}
+              disabled={isPlaybackLoading || isLoadingTrack}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
-              {isPlaybackLoading || isTrackLoading ? (
+              {isPlaybackLoading || isLoadingTrack ? (
                 <Loader2 size={24} className="animate-spin" />
               ) : isPlaying ? (
                 <Pause size={26} />
@@ -905,11 +905,11 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayPauseToggle}
-              disabled={isPlaybackLoading || isTrackLoading}
+              disabled={isPlaybackLoading || isLoadingTrack}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
-              {isPlaybackLoading || isTrackLoading ? (
+              {isPlaybackLoading || isLoadingTrack ? (
                 <Loader2 size={16} className="animate-spin" />
               ) : isPlaying ? (
                 <Pause size={17} />
