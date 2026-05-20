@@ -29,10 +29,12 @@ const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
 
 class AudioEngine {
   private audio: HTMLAudioElement | null = null;
+  private preparedAudio: HTMLAudioElement | null = null;
   private callbacks: EngineCallbacks = {};
   private currentTrack: EngineTrack | null = null;
   private nextTrack: EngineTrack | null = null;
   private nextStreamUrl: string | null = null;
+  private preparedTrackVideoId: string | null = null;
   private streamUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
   private preloadRequested = new Set<string>();
   private mediaSessionInitialized = false;
@@ -275,24 +277,42 @@ class AudioEngine {
 
     if (this.audio) return this.audio;
 
-    const element = new Audio();
-    element.preload = "auto";
-    element.style.cssText =
-      "position:fixed;width:0;height:0;opacity:0;pointer-events:none;z-index:-1;";
-    document.body.appendChild(element);
-
+    const element = this.createAudioElement();
     this.audio = element;
-    this.attachEvents();
+    this.attachEvents(element);
     this.initMediaSessionOnce();
     this.initVisibilityHandler();
     this.initHeartbeat();
     return element;
   }
 
-  private attachEvents(): void {
-    if (!this.audio) return;
+  private ensurePreparedAudio(): HTMLAudioElement {
+    if (typeof window === "undefined") {
+      throw new Error("Audio engine can only run in the browser");
+    }
 
-    this.audio.addEventListener("play", () => {
+    if (this.preparedAudio) return this.preparedAudio;
+
+    const element = this.createAudioElement();
+    this.preparedAudio = element;
+    this.attachEvents(element);
+    return element;
+  }
+
+  private createAudioElement(): HTMLAudioElement {
+    const element = new Audio();
+    element.preload = "auto";
+    element.style.cssText =
+      "position:fixed;width:0;height:0;opacity:0;pointer-events:none;z-index:-1;";
+    document.body.appendChild(element);
+    return element;
+  }
+
+  private attachEvents(audio: HTMLAudioElement): void {
+    const isActiveAudio = () => this.audio === audio;
+
+    audio.addEventListener("play", () => {
+      if (!isActiveAudio()) return;
       // NOTE: directTransitionVideoId is intentionally NOT cleared here.
       // The play event can fire before React's state-update cycle completes and
       // the playSong() guard runs. Clearing it here would let the React effect's
@@ -312,7 +332,8 @@ class AudioEngine {
       this.debugAudioState("event:play");
     });
 
-    this.audio.addEventListener("pause", () => {
+    audio.addEventListener("pause", () => {
+      if (!isActiveAudio()) return;
       this.callbacks.onPlayStateChange?.(false);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "paused";
@@ -321,9 +342,9 @@ class AudioEngine {
       this.debugAudioState("event:pause");
     });
 
-    this.audio.addEventListener("loadedmetadata", () => {
-      if (!this.audio) return;
-      const duration = this.audio.duration;
+    audio.addEventListener("loadedmetadata", () => {
+      if (!isActiveAudio()) return;
+      const duration = audio.duration;
       if (Number.isFinite(duration)) {
         this.callbacks.onDuration?.(duration);
         // Tell Android Chrome the real duration so the notification seek bar is accurate
@@ -332,11 +353,11 @@ class AudioEngine {
       this.debugAudioState("event:loadedmetadata");
     });
 
-    this.audio.addEventListener("timeupdate", () => {
-      if (!this.audio) return;
+    audio.addEventListener("timeupdate", () => {
+      if (!isActiveAudio()) return;
 
-      const currentTime = this.audio.currentTime;
-      const duration = this.audio.duration;
+      const currentTime = audio.currentTime;
+      const duration = audio.duration;
       this.callbacks.onTimeUpdate?.(currentTime, duration);
 
       // Throttle to ~every 1 s — Android notification needs periodic position updates
@@ -358,7 +379,8 @@ class AudioEngine {
       }
     });
 
-    this.audio.addEventListener("ended", () => {
+    audio.addEventListener("ended", () => {
+      if (!isActiveAudio()) return;
       this.transitionCount += 1;
       this.debugAudioState("event:ended");
       // ── Direct transition (critical for mobile autoplay) ──────────────────
@@ -374,6 +396,11 @@ class AudioEngine {
           this.positionUpdateTick = 0;
           const track = this.nextTrack;
           const song = this.nextSong;
+          const previousAudio = this.audio;
+          const canSwapPreparedAudio =
+            this.preparedAudio != null &&
+            this.preparedTrackVideoId === track.videoId &&
+            this.preparedAudio.src.length > 0;
 
           this.currentTrack = track;
           this.currentPlaybackOrdinal = this.transitionCount + 1;
@@ -385,16 +412,26 @@ class AudioEngine {
           this.nextSong = null;
           this.nextStreamUrl = null;
 
-          // Set new src and update MediaSession BEFORE play() so the lock-screen
-          // notification refreshes immediately with no visible gap.
-          this.audio.src = nextUrl;
+          if (canSwapPreparedAudio && this.preparedAudio) {
+            this.audio = this.preparedAudio;
+            this.preparedAudio = previousAudio;
+            this.preparedTrackVideoId = null;
+            this.preparedAudio.pause();
+            this.preparedAudio.removeAttribute("src");
+            this.preparedAudio.load();
+          } else {
+            // Fallback when standby preparation failed: keep the legacy src swap path.
+            this.audio.src = nextUrl;
+          }
+
           this.debugLog("transition:src-assigned", {
-            fromVideoId: this.currentTrack?.videoId,
+            fromVideoId: song.youtube_video_id,
             toVideoId: track.videoId,
-            srcKind: this.describeSrcKind(nextUrl),
+            srcKind: this.describeSrcKind(this.audio.src || nextUrl),
             transitionCount: this.transitionCount,
             playbackOrdinal: this.currentPlaybackOrdinal,
             trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
+            usedPreparedAudio: canSwapPreparedAudio,
           });
           this.updateMediaSession(track);
 
@@ -439,13 +476,15 @@ class AudioEngine {
       this.callbacks.onEnded?.();
     });
 
-    this.audio.addEventListener("error", () => {
+    audio.addEventListener("error", () => {
+      if (!isActiveAudio()) return;
       this.debugAudioState("event:error");
       this.callbacks.onError?.(this.audio?.error ?? null);
     });
 
     for (const eventName of ["loadstart", "canplay", "canplaythrough", "playing", "waiting", "stalled", "suspend", "abort", "emptied"] as const) {
-      this.audio.addEventListener(eventName, () => {
+      audio.addEventListener(eventName, () => {
+        if (!isActiveAudio()) return;
         this.debugAudioState(`event:${eventName}`);
       });
     }
@@ -730,6 +769,8 @@ class AudioEngine {
     if (this.preloadRequested.has(this.nextTrack.videoId)) return;
     this.preloadRequested.add(this.nextTrack.videoId);
 
+    this.prepareStandbyAudio(this.nextTrack.videoId, this.nextStreamUrl);
+
     if (this.nextStreamUrl.startsWith("blob:")) {
       return;
     }
@@ -741,6 +782,26 @@ class AudioEngine {
       });
     } catch {
       // Keep moving; preloading is opportunistic.
+    }
+  }
+
+  private prepareStandbyAudio(videoId: string, src: string): void {
+    try {
+      const audio = this.ensurePreparedAudio();
+      if (this.preparedTrackVideoId === videoId && audio.src === src) {
+        return;
+      }
+
+      audio.pause();
+      audio.src = src;
+      audio.load();
+      this.preparedTrackVideoId = videoId;
+      this.debugLog("prepared-audio:ready", {
+        videoId,
+        srcKind: this.describeSrcKind(src),
+      });
+    } catch {
+      // Best effort only.
     }
   }
 
