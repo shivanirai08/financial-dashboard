@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
 import { audioEngine } from "@/lib/audio-engine";
+import { useToastStore } from "@/store/toast-store";
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -427,8 +428,11 @@ export function PlayerBar() {
         setIsIframeFallback(false);
         setIsTrackLoading(false);
         clearPlaybackLoading();
+        useToastStore.getState().addToast("Song is playing successfully.");
       })
-      .catch(async () => {
+      .catch(async (error) => {
+        useToastStore.getState().addToast(`Error: ${error.message || "Failed to play song."}`);
+
         if (!currentSong.youtube_video_id) {
           setIsTrackLoading(false);
           clearPlaybackLoading();
