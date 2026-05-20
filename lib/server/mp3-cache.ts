@@ -43,11 +43,13 @@ const PROVIDER_ORDER = (process.env.RAPIDAPI_PROVIDER_ORDER ?? "youtube-mp36,you
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing Supabase environment variables for MP3 cache");
-}
+function getSupabaseClient() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Missing Supabase environment variables for MP3 cache");
+  }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+}
 
 function monthKey(date = new Date()): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -62,6 +64,7 @@ function normalizeVideoId(videoId: string): string {
 }
 
 function buildPublicUrl(objectPath: string): string {
+  const supabase = getSupabaseClient();
   const { data } = supabase.storage.from(CACHE_BUCKET).getPublicUrl(objectPath);
   return data.publicUrl;
 }
@@ -83,6 +86,7 @@ async function urlExists(url: string): Promise<boolean> {
 }
 
 async function getCacheRow(videoId: string): Promise<CacheRow | null> {
+  const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("yt_mp3_cache_index")
     .select("video_id, object_path, size_bytes, provider, last_accessed")
@@ -97,6 +101,7 @@ async function getCacheRow(videoId: string): Promise<CacheRow | null> {
 }
 
 async function touchCacheRow(videoId: string): Promise<void> {
+  const supabase = getSupabaseClient();
   await supabase
     .from("yt_mp3_cache_index")
     .update({ last_accessed: new Date().toISOString() })
@@ -104,6 +109,7 @@ async function touchCacheRow(videoId: string): Promise<void> {
 }
 
 async function getMonthlyUsage(provider: ProviderName): Promise<number> {
+  const supabase = getSupabaseClient();
   const key = monthKey();
   const { data, error } = await supabase
     .from("yt_mp3_api_usage")
@@ -125,6 +131,7 @@ async function canUseProvider(provider: ProviderName): Promise<boolean> {
 }
 
 async function incrementProviderUsage(provider: ProviderName): Promise<void> {
+  const supabase = getSupabaseClient();
   const key = monthKey();
   const current = await getMonthlyUsage(provider);
 
@@ -253,10 +260,12 @@ async function downloadAudio(url: string): Promise<{ bytes: Uint8Array; sizeByte
 }
 
 async function deleteCacheObject(objectPath: string): Promise<void> {
+  const supabase = getSupabaseClient();
   await supabase.storage.from(CACHE_BUCKET).remove([objectPath]);
 }
 
 async function ensureCapacity(incomingBytes: number, protectedVideoId?: string): Promise<void> {
+  const supabase = getSupabaseClient();
   if (incomingBytes > MAX_BUCKET_BYTES) {
     throw new Error("Track is larger than total cache budget");
   }
@@ -303,6 +312,7 @@ async function writeCacheIndex(
   sizeBytes: number,
   provider: ProviderName
 ): Promise<void> {
+  const supabase = getSupabaseClient();
   const now = new Date().toISOString();
   const { error } = await supabase.from("yt_mp3_cache_index").upsert(
     {
@@ -322,6 +332,7 @@ async function writeCacheIndex(
 }
 
 export async function ensureCachedMp3(videoIdInput: string): Promise<EnsureCachedResult> {
+  const supabase = getSupabaseClient();
   const videoId = normalizeVideoId(videoIdInput);
   const objectPath = `${videoId}.mp3`;
 
