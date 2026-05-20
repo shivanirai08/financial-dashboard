@@ -23,7 +23,6 @@ const STREAM_BACKEND_BASE =
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 const QUEUE_PRELOAD_BATCH_SIZE = 2; // Keep queue prefetch small to control API usage
 const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
-const MOBILE_UA_RE = /Android|iPhone|iPad|iPod|Windows Phone|IEMobile|Opera Mini/i;
 
 class AudioEngine {
   private audio: HTMLAudioElement | null = null;
@@ -422,16 +421,8 @@ class AudioEngine {
   }
 
   private shouldUseDownloadFlow(): boolean {
-    if (typeof window === "undefined" || typeof navigator === "undefined") {
-      return true;
-    }
-
-    const nav = navigator as Navigator & { standalone?: boolean };
-    const isStandalone =
-      window.matchMedia("(display-mode: standalone)").matches || nav.standalone === true;
-    const isMobile = MOBILE_UA_RE.test(navigator.userAgent);
-
-    return isStandalone || isMobile;
+    // Temporary testing override: enable cache/download flow on desktop as well.
+    return true;
   }
 
   private async isPlayableStreamUrl(streamUrl: string): Promise<boolean> {
