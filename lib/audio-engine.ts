@@ -279,15 +279,6 @@ class AudioEngine {
       void this.syncPlaybackState(false);
     });
 
-    // Play/pause toggle for lockscreen
-    safeSet("playpause", async () => {
-      if (this.audio?.paused) {
-        await this.syncPlaybackState(true);
-      } else {
-        void this.syncPlaybackState(false);
-      }
-    });
-
     // Queue navigation
     safeSet("nexttrack", async () => {
       this.callbacks.onNext?.();
