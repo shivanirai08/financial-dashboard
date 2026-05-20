@@ -23,36 +23,9 @@ import {
   Loader2,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
-import {
-  getPersistentAudio,
-  primeAudioOnGesture,
-  setAudioCallbacks,
-  updateMediaSessionMetadata,
-} from "@/lib/audio-manager";
+import { audioEngine } from "@/lib/audio-engine";
 
-// ─── NOTE ON THE THREE FIXES ──────────────────────────────────────────────────
-//
-// FIX 1 — beforeinstallprompt / install prompt stopping audio:
-//   audio-manager.ts captures the event at MODULE LOAD TIME via addEventListener.
-//   This means it is captured before any React component mounts, before any song
-//   plays, and e.preventDefault() stops Chrome's native mini-infobar from ever
-//   auto-appearing mid-playback.
-//
-// FIX 2 — Second song stops + no lock screen:
-//   a) We call updateMediaSessionMetadata() synchronously inside the song-load
-//      useEffect, BEFORE the fetch starts. No gap where lock screen is blank.
-//   b) We call setAudioCallbacks() to update the module-level refs. MediaSession
-//      action handlers were registered ONCE in audio-manager.ts and never torn
-//      down — they always point to the latest callbacks via those refs.
-//   c) We do NOT call audio.load() after setting audio.src. audio.load() resets
-//      the gesture token, causing song 2 to be treated as unauthorized autoplay.
-//
-// FIX 3 — Screen off / home button stops playback:
-//   The audio element is appended to document.body in getPersistentAudio().
-//   MediaSession handlers stay registered at all times. Chrome Android keeps
-//   background audio alive when both of these conditions are true.
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// Playback is managed by lib/audio-engine.ts so it survives React component churn.
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -61,30 +34,7 @@ function formatTime(sec: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-const STREAM_BACKEND_BASE =
-  process.env.NEXT_PUBLIC_STREAM_BACKEND_URL?.replace(/\/$/, "") ?? "";
-
-function getStreamEndpoint(videoId: string) {
-  if (STREAM_BACKEND_BASE) {
-    return `${STREAM_BACKEND_BASE}/api/stream/${videoId}`;
-  }
-  return `/api/stream/${videoId}`;
-}
-
-function getLocalStreamEndpoint(videoId: string) {
-  return `/api/stream/${videoId}`;
-}
-
-type AudioListener = {
-  event: keyof HTMLMediaElementEventMap;
-  handler: EventListener;
-};
-
 export function PlayerBar() {
-  const NATIVE_STREAM_DISABLED_KEY = "pulsebox_native_stream_disabled";
-  const NATIVE_STREAM_FAIL_COUNT_KEY = "pulsebox_native_stream_fail_count";
-  const NATIVE_STREAM_FAIL_THRESHOLD = 3;
-
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const {
@@ -222,8 +172,6 @@ export function PlayerBar() {
   const usingNativeAudioRef = useRef(false);
   const isLoadingVideoRef = useRef(false);
   const tabHiddenRef = useRef(false);
-  const audioListenersRef = useRef<AudioListener[]>([]);
-  const nativeStreamDisabledRef = useRef(false);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -232,39 +180,47 @@ export function PlayerBar() {
 
   useEffect(() => {
     setMounted(true);
-    // Ensure the audio element exists and is in the DOM from the first mount
-    getPersistentAudio();
-
-    try {
-      nativeStreamDisabledRef.current =
-        window.sessionStorage.getItem(NATIVE_STREAM_DISABLED_KEY) === "1";
-
-      // If we are explicitly using an external stream backend, clear any stale
-      // session disable flags so native streaming can retry after migrations.
-      if (STREAM_BACKEND_BASE) {
-        window.sessionStorage.removeItem(NATIVE_STREAM_DISABLED_KEY);
-        window.sessionStorage.removeItem(NATIVE_STREAM_FAIL_COUNT_KEY);
-        nativeStreamDisabledRef.current = false;
-      }
-    } catch {
-      nativeStreamDisabledRef.current = false;
-    }
+    audioEngine.init();
   }, []);
 
-  // ── Wire up module-level audio callbacks ──────────────────────────────────
-  // This replaces re-registering MediaSession handlers in useEffect.
-  // We just update the refs; the handlers in audio-manager.ts always read
-  // the latest values through the module-level refs.
+  // Keep engine callbacks in sync with the latest store callbacks.
   useEffect(() => {
-    setAudioCallbacks({
+    audioEngine.setCallbacks({
+      onPlayStateChange: (playing) => setIsPlaying(playing),
+      onTimeUpdate: (currentTimeValue, durationValue) => {
+        if (!durationValue || !isFinite(durationValue) || durationValue <= 0) {
+          setProgress(0);
+          return;
+        }
+
+        setDuration(durationValue);
+        setProgress((currentTimeValue / durationValue) * 100);
+
+        if ("mediaSession" in navigator) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: durationValue,
+              playbackRate: 1,
+              position: Math.min(currentTimeValue, durationValue),
+            });
+          } catch {
+            // Older browsers can throw for this API.
+          }
+        }
+      },
+      onDuration: (durationValue) => setDuration(durationValue),
       onNext: () => playNextRef.current(),
       onPrev: () => playPrevRef.current(),
       onEnded: () => {
         setProgress(0);
         playNextRef.current();
       },
+      onError: () => {
+        usingNativeAudioRef.current = false;
+        setAudioLoading(false);
+      },
     });
-  }, []); // only on mount — the refs always stay current
+  }, [setIsPlaying]);
 
   // ── Visibility change ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -358,7 +314,7 @@ export function PlayerBar() {
   // ── MediaSession playback state sync ─────────────────────────────────────
   // IMPORTANT: We only sync playbackState here, NOT metadata and NOT handlers.
   // Metadata is set synchronously in the song-load effect below.
-  // Handlers are set once in audio-manager.ts and never changed.
+  // Handlers are registered once by the singleton audio engine.
   useEffect(() => {
     if (!mounted || !("mediaSession" in navigator)) return;
     if (currentSong) {
@@ -372,183 +328,28 @@ export function PlayerBar() {
     }
   }, [mounted, isPlaying, currentSong]);
 
+  function getNextSongInQueue() {
+    if (!queue.length || currentQueuePos < 0) return null;
+    const nextPos = currentQueuePos + 1;
+    if (nextPos >= queue.length) return null;
+    return songs[queue[nextPos]] ?? null;
+  }
+
+  useEffect(() => {
+    audioEngine.setNextTrack(getNextSongInQueue());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentQueuePos, queue, songs]);
+
   // ── Load new song when currentSong changes ────────────────────────────────
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
     const videoId = currentSong.youtube_video_id;
-    const songId = currentSong.id;
+    let cancelled = false;
 
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
     setAudioLoading(true);
-
-    // ── FIX 2a: Update lock screen metadata IMMEDIATELY, before fetch ────
-    // This keeps the notification alive continuously between song changes.
-    updateMediaSessionMetadata({
-      title: currentSong.title,
-      artist: currentSong.artist ?? undefined,
-      thumbnail: currentSong.thumbnail ?? undefined,
-    });
-
-    const abortController = new AbortController();
-
-    function markNativeStreamFailure() {
-      try {
-        const nextFailCount =
-          Number(window.sessionStorage.getItem(NATIVE_STREAM_FAIL_COUNT_KEY) ?? "0") + 1;
-        window.sessionStorage.setItem(NATIVE_STREAM_FAIL_COUNT_KEY, String(nextFailCount));
-        if (nextFailCount >= NATIVE_STREAM_FAIL_THRESHOLD) {
-          window.sessionStorage.setItem(NATIVE_STREAM_DISABLED_KEY, "1");
-          nativeStreamDisabledRef.current = true;
-          console.warn("[player] Native stream disabled for this session after repeated failures");
-        }
-      } catch {
-        // ignore storage failures
-      }
-    }
-
-    function clearNativeStreamFailures() {
-      try {
-        window.sessionStorage.removeItem(NATIVE_STREAM_FAIL_COUNT_KEY);
-      } catch {
-        // ignore storage failures
-      }
-    }
-
-    async function loadNativeAudio() {
-      try {
-        if (nativeStreamDisabledRef.current) {
-          fallbackToIframe();
-          return;
-        }
-
-        const primaryEndpoint = getStreamEndpoint(videoId);
-        const localEndpoint = getLocalStreamEndpoint(videoId);
-        let selectedEndpoint = primaryEndpoint;
-
-        let res = await fetch(selectedEndpoint, {
-          signal: abortController.signal,
-        });
-
-        if (!res.ok && selectedEndpoint !== localEndpoint) {
-          // If external backend cannot resolve this specific video, retry with
-          // the local Next API route to maximize playback success.
-          console.warn(
-            `[player] External stream failed (${res.status}), retrying local endpoint`
-          );
-          selectedEndpoint = localEndpoint;
-          res = await fetch(selectedEndpoint, {
-            signal: abortController.signal,
-          });
-        }
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        if (!res.body) throw new Error("No stream body");
-
-        if (abortController.signal.aborted) return;
-        if (usePlayerStore.getState().currentSong?.id !== songId) return;
-
-        const audio = getPersistentAudio();
-        usingNativeAudioRef.current = true;
-
-        // Clear previously registered native-audio listeners before attaching
-        // a new set for the next track to avoid duplicate callbacks.
-        for (const { event, handler } of audioListenersRef.current) {
-          audio.removeEventListener(event, handler);
-        }
-        audioListenersRef.current = [];
-
-        // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
-        // audio.load() resets the user-gesture unlock. Setting src directly
-        // preserves the gesture token from the first user tap.
-        audio.src = selectedEndpoint;
-        // audio.load() — ← INTENTIONALLY REMOVED — this was the root cause
-
-        const onPlay = () => {
-          if (usePlayerStore.getState().currentSong?.id === songId) {
-            setIsPlaying(true);
-            if ("mediaSession" in navigator) {
-              try { navigator.mediaSession.playbackState = "playing"; } catch { /* ignore */ }
-            }
-          }
-        };
-        const onPause = () => {
-          if (usePlayerStore.getState().currentSong?.id === songId) {
-            setIsPlaying(false);
-            if ("mediaSession" in navigator) {
-              try { navigator.mediaSession.playbackState = "paused"; } catch { /* ignore */ }
-            }
-          }
-        };
-        const onEnded = () => {
-          setProgress(0);
-          playNextRef.current();
-        };
-        const onTimeUpdate = () => {
-          const cur = audio.currentTime;
-          const dur = audio.duration;
-          if (dur > 0 && isFinite(dur)) {
-            setProgress((cur / dur) * 100);
-            setDuration(dur);
-            // Update position state for lock screen seekbar (critical for background)
-            if ("mediaSession" in navigator) {
-              try {
-                navigator.mediaSession.setPositionState({
-                  duration: dur,
-                  playbackRate: 1,
-                  position: Math.min(cur, dur),
-                });
-              } catch { /* setPositionState can throw on older Android */ }
-            }
-          }
-        };
-        const onLoadedMetadata = () => {
-          if (audio.duration && isFinite(audio.duration)) {
-            setDuration(audio.duration);
-          }
-        };
-        const onError = (e: Event) => {
-          const audio = e.target as HTMLAudioElement;
-          console.warn(`[player] Audio error: ${audio.error?.message || 'unknown'}, trying fallback`);
-          usingNativeAudioRef.current = false;
-          for (const { event, handler } of audioListenersRef.current) {
-            audio.removeEventListener(event, handler);
-          }
-          audioListenersRef.current = [];
-          fallbackToIframe();
-        };
-
-        const listeners: AudioListener[] = [
-          { event: "play", handler: onPlay as EventListener },
-          { event: "pause", handler: onPause as EventListener },
-          { event: "ended", handler: onEnded as EventListener },
-          { event: "timeupdate", handler: onTimeUpdate as EventListener },
-          { event: "loadedmetadata", handler: onLoadedMetadata as EventListener },
-          { event: "error", handler: onError as EventListener },
-        ];
-        for (const { event, handler } of listeners) {
-          audio.addEventListener(event, handler);
-        }
-        audioListenersRef.current = listeners;
-
-        await audio.play();
-        clearNativeStreamFailures();
-        setAudioLoading(false);
-
-        // If video panel is showing, load the video muted for visuals
-        if (usePlayerStore.getState().showVideo && playerRef.current) {
-          (playerRef.current as unknown as { mute: () => void }).mute();
-          playerRef.current.loadVideoById(videoId);
-        }
-
-      } catch (err) {
-        if (abortController.signal.aborted) return;
-        markNativeStreamFailure();
-        console.warn("[player] Native audio fetch failed, falling back to iframe:", err);
-        fallbackToIframe();
-      }
-    }
 
     function fallbackToIframe() {
       usingNativeAudioRef.current = false;
@@ -560,15 +361,27 @@ export function PlayerBar() {
       }
     }
 
-    loadNativeAudio();
+    audioEngine.setNextTrack(getNextSongInQueue());
+    void audioEngine
+      .playSong(currentSong)
+      .then(() => {
+        if (cancelled) return;
+        usingNativeAudioRef.current = true;
+        setAudioLoading(false);
+
+        if (usePlayerStore.getState().showVideo && playerRef.current) {
+          (playerRef.current as unknown as { mute: () => void }).mute();
+          playerRef.current.loadVideoById(videoId);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[player] Native audio failed, falling back to iframe:", err);
+        fallbackToIframe();
+      });
 
     return () => {
-      abortController.abort();
-      const audio = getPersistentAudio();
-      for (const { event, handler } of audioListenersRef.current) {
-        audio.removeEventListener(event, handler);
-      }
-      audioListenersRef.current = [];
+      cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSong?.youtube_video_id, currentSong?.id]);
@@ -591,13 +404,9 @@ export function PlayerBar() {
   useEffect(() => {
     if (!currentSong) return;
     if (usingNativeAudioRef.current) {
-      const audio = getPersistentAudio();
-      if (!audio) return;
-      if (isPlaying && audio.paused && audio.src) {
-        audio.play().catch(() => {});
-      } else if (!isPlaying && !audio.paused) {
-        audio.pause();
-      }
+      void audioEngine.syncPlaybackState(isPlaying).catch(() => {
+        // Ignore transient autoplay/state errors.
+      });
     } else {
       if (!playerRef.current) return;
       if (!isPlaying && tabHiddenRef.current) return;
@@ -617,8 +426,7 @@ export function PlayerBar() {
     const seekTime = pct * duration;
 
     if (usingNativeAudioRef.current) {
-      const audio = getPersistentAudio();
-      if (audio) audio.currentTime = seekTime;
+      audioEngine.seekTo(seekTime);
     } else if (playerRef.current) {
       playerRef.current.seekTo(seekTime, true);
     }
@@ -653,21 +461,18 @@ export function PlayerBar() {
   }
 
   function handlePlayToggle() {
-    // ── FIX 1 + FIX 2b: prime on every user tap ─────────────────────────
-    // primeAudioOnGesture() is idempotent — only does work on the first call.
-    // This ensures the gesture token is locked in before we change any src.
-    primeAudioOnGesture();
+    void audioEngine.primeOnGesture();
     setIsPlaying(!isPlaying);
   }
 
   // Also prime on skip buttons — they trigger playback too
   function handleNext() {
-    primeAudioOnGesture();
+    void audioEngine.primeOnGesture();
     playNext();
   }
 
   function handlePrev() {
-    primeAudioOnGesture();
+    void audioEngine.primeOnGesture();
     playPrev();
   }
 
@@ -926,7 +731,7 @@ export function PlayerBar() {
                 <button
                   key={s.id}
                   onClick={() => {
-                    primeAudioOnGesture();
+                    void audioEngine.primeOnGesture();
                     playAtIndex(songIndex);
                     toggleQueue();
                   }}

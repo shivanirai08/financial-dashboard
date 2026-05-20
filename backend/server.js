@@ -253,7 +253,7 @@ app.get("/api/youtube/audio/:videoId", async (req, res) => {
       return res.status(404).json({ error: "No audio available" });
     }
 
-    return res.json({ url });
+    return res.json({ streamUrl: url, url });
   } catch (error) {
     console.error(`[audio/${videoId}] Error:`, error?.message || "unknown error");
     return res.status(500).json({ error: "Internal server error" });

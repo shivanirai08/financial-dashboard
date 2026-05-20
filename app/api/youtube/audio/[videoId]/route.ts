@@ -242,7 +242,7 @@ export async function GET(
   const cached = audioUrlCache.get(videoId);
   if (cached && cached.expires > Date.now()) {
     console.log(`[audio/${videoId}] Cache hit`);
-    return NextResponse.json({ url: cached.url });
+    return NextResponse.json({ streamUrl: cached.url, url: cached.url });
   }
 
   console.log(`[audio/${videoId}] Cache miss, fetching...`);
@@ -286,5 +286,5 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({ url: audioUrl });
+  return NextResponse.json({ streamUrl: audioUrl, url: audioUrl });
 }
