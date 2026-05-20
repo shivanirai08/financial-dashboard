@@ -22,6 +22,10 @@ export type EnsureCachedResult = {
   provider: ProviderName | "cache";
 };
 
+type ResolveMp3Options = {
+  useCache?: boolean;
+};
+
 const CACHE_BUCKET = process.env.MP3_CACHE_BUCKET ?? "yt-mp3-cache";
 const MAX_BUCKET_BYTES = Number(process.env.MP3_CACHE_MAX_BYTES ?? "1000000000");
 const TARGET_BUCKET_BYTES = Number(process.env.MP3_CACHE_TARGET_BYTES ?? "900000000");
@@ -332,9 +336,27 @@ async function writeCacheIndex(
 }
 
 export async function ensureCachedMp3(videoIdInput: string): Promise<EnsureCachedResult> {
+  return resolveMp3Link(videoIdInput, { useCache: true });
+}
+
+export async function resolveMp3Link(
+  videoIdInput: string,
+  options: ResolveMp3Options = {}
+): Promise<EnsureCachedResult> {
+  const useCache = options.useCache ?? true;
   const supabase = getSupabaseClient();
   const videoId = normalizeVideoId(videoIdInput);
   const objectPath = `${videoId}.mp3`;
+
+  if (!useCache) {
+    const resolved = await resolveProviderStream(videoId);
+    return {
+      status: "ok",
+      link: resolved.streamUrl,
+      cached: false,
+      provider: resolved.provider,
+    };
+  }
 
   const existing = await getCacheRow(videoId);
   if (existing) {

@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
-import { ensureCachedMp3 } from "@/lib/server/mp3-cache";
+import { resolveMp3Link } from "@/lib/server/mp3-cache";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   try {
+    const url = new URL(req.url);
+    const flow = url.searchParams.get("flow");
+    const useCache = flow !== "direct";
     const { videoId } = await params;
-    const result = await ensureCachedMp3(videoId);
+    const result = await resolveMp3Link(videoId, { useCache });
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to resolve MP3 stream";
