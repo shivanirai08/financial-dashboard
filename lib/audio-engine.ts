@@ -18,8 +18,6 @@ type EngineCallbacks = {
   onPrev?: () => void;
 };
 
-const STREAM_BACKEND_BASE =
-  process.env.NEXT_PUBLIC_STREAM_BACKEND_URL?.replace(/\/$/, "") ?? "";
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 const QUEUE_PRELOAD_BATCH_SIZE = 2; // Keep queue prefetch small to control API usage
 const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
@@ -84,9 +82,7 @@ class AudioEngine {
         return;
       }
 
-      const queueEndpoint = STREAM_BACKEND_BASE
-        ? `${STREAM_BACKEND_BASE}/api/youtube/audio-mp3/queue`
-        : "/api/youtube/audio-mp3/queue";
+      const queueEndpoint = "/api/youtube/audio-mp3/queue"; // Always use relative path
 
       const queueRes = await fetch(queueEndpoint, {
         method: "POST",
@@ -396,12 +392,10 @@ class AudioEngine {
 
     const flow = this.shouldUseDownloadFlow() ? "cache" : "direct";
 
-    const primaryEndpoint = STREAM_BACKEND_BASE
-      ? `${STREAM_BACKEND_BASE}/api/youtube/audio-mp3/${videoId}?flow=${flow}`
-      : `/api/youtube/audio-mp3/${videoId}?flow=${flow}`;
+    const primaryEndpoint = `/api/youtube/audio-mp3/${videoId}?flow=${flow}`;
 
     let response = await fetch(primaryEndpoint);
-    if (!response.ok && !STREAM_BACKEND_BASE) {
+    if (!response.ok) {
       response = await fetch(`/api/youtube/audio-mp3/${videoId}?flow=${flow}`);
     }
 
