@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   Play,
   Pause,
+  Loader2,
   SkipBack,
   SkipForward,
   Shuffle,
@@ -145,6 +146,7 @@ export function PlayerBar() {
   }
   const playerRef = useRef<YT.Player | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playbackToggleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const playNextRef = useRef(playNext);
   playNextRef.current = playNext;
@@ -154,6 +156,7 @@ export function PlayerBar() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
+  const [isPlaybackLoading, setIsPlaybackLoading] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -243,6 +246,10 @@ export function PlayerBar() {
   useEffect(() => {
     return () => {
       void releaseWakeLock();
+      if (playbackToggleTimeoutRef.current) {
+        clearTimeout(playbackToggleTimeoutRef.current);
+        playbackToggleTimeoutRef.current = null;
+      }
     };
   }, [releaseWakeLock]);
 
@@ -256,6 +263,7 @@ export function PlayerBar() {
       events: {
         onStateChange(event) {
           if (event.data === 1) {
+            setIsPlaybackLoading(false);
             setIsPlaying(true);
             if (!intervalRef.current) {
               intervalRef.current = setInterval(() => {
@@ -268,6 +276,7 @@ export function PlayerBar() {
               }, 500);
             }
           } else if (event.data === 2) {
+            setIsPlaybackLoading(false);
             // Only reflect PAUSED state when the tab is actually visible
             // (hidden tab browsers silently pause YouTube — we ignore it)
             if (!tabHiddenRef.current) {
@@ -411,6 +420,22 @@ export function PlayerBar() {
     }
   }
 
+  function handlePlayPauseToggle() {
+    if (!currentSong) return;
+
+    setIsPlaybackLoading(true);
+    if (playbackToggleTimeoutRef.current) {
+      clearTimeout(playbackToggleTimeoutRef.current);
+    }
+
+    playbackToggleTimeoutRef.current = setTimeout(() => {
+      setIsPlaybackLoading(false);
+      playbackToggleTimeoutRef.current = null;
+    }, 2500);
+
+    setIsPlaying(!isPlaying);
+  }
+
   const currentTime = duration > 0 ? (progress / 100) * duration : 0;
 
   // Prevent SSR/client mismatch when persisted player state exists only on client.
@@ -511,10 +536,17 @@ export function PlayerBar() {
               <SkipBack size={30} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={handlePlayPauseToggle}
+              disabled={isPlaybackLoading}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
-              {isPlaying ? <Pause size={26} /> : <Play size={26} className="ml-1" />}
+              {isPlaybackLoading ? (
+                <Loader2 size={24} className="animate-spin" />
+              ) : isPlaying ? (
+                <Pause size={26} />
+              ) : (
+                <Play size={26} className="ml-1" />
+              )}
             </button>
             <button
               onClick={playNext}
@@ -759,11 +791,18 @@ export function PlayerBar() {
               <SkipBack size={18} />
             </button>
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={handlePlayPauseToggle}
+              disabled={isPlaybackLoading}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
-              {isPlaying ? <Pause size={17} /> : <Play size={17} className="ml-0.5" />}
+              {isPlaybackLoading ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : isPlaying ? (
+                <Pause size={17} />
+              ) : (
+                <Play size={17} className="ml-0.5" />
+              )}
             </button>
             <button
               onClick={playNext}
