@@ -234,6 +234,14 @@ export function PlayerBar() {
     try {
       nativeStreamDisabledRef.current =
         window.sessionStorage.getItem(NATIVE_STREAM_DISABLED_KEY) === "1";
+
+      // If we are explicitly using an external stream backend, clear any stale
+      // session disable flags so native streaming can retry after migrations.
+      if (STREAM_BACKEND_BASE) {
+        window.sessionStorage.removeItem(NATIVE_STREAM_DISABLED_KEY);
+        window.sessionStorage.removeItem(NATIVE_STREAM_FAIL_COUNT_KEY);
+        nativeStreamDisabledRef.current = false;
+      }
     } catch {
       nativeStreamDisabledRef.current = false;
     }
