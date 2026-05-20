@@ -103,17 +103,19 @@ export function primeAudioOnGesture(): void {
   // Shortest valid WAV — 50ms silence
   const silent =
     "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+  const prevSrc = audio.src;
   audio.src = silent;
   audio.volume = 0;
   const p = audio.play();
   if (p) {
     p.then(() => {
       audio.pause();
-      audio.src = "";
+      audio.src = prevSrc || "";
       audio.volume = 1;
       _gestureUnlocked = true;
     }).catch(() => {
       // Gesture unlock failed — that's fine, the next actual play() will try again
+      audio.src = prevSrc || "";
       audio.volume = 1;
     });
   }
@@ -239,6 +241,10 @@ export function updateMediaSessionMetadata(song: {
 }): void {
   if (!("mediaSession" in navigator)) return;
 
+  // Set playback state first so Android treats the session as active before
+  // metadata lands, which helps avoid lock-screen gaps on song boundaries.
+  navigator.mediaSession.playbackState = "playing";
+
   navigator.mediaSession.metadata = new MediaMetadata({
     title: song.title,
     artist: song.artist ?? "Pulsebox",
@@ -252,10 +258,6 @@ export function updateMediaSessionMetadata(song: {
       : [],
   });
 
-  // Explicitly set to "playing" so Android renders the notification immediately.
-  // Don't wait for the audio "play" event — by that time the notification gap has
-  // already occurred.
-  navigator.mediaSession.playbackState = "playing";
 }
 
 // ─── Install prompt ───────────────────────────────────────────────────────────

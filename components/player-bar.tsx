@@ -61,6 +61,11 @@ function formatTime(sec: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+type AudioListener = {
+  event: keyof HTMLMediaElementEventMap;
+  handler: EventListener;
+};
+
 export function PlayerBar() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
@@ -199,6 +204,7 @@ export function PlayerBar() {
   const usingNativeAudioRef = useRef(false);
   const isLoadingVideoRef = useRef(false);
   const tabHiddenRef = useRef(false);
+  const audioListenersRef = useRef<AudioListener[]>([]);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -368,6 +374,13 @@ export function PlayerBar() {
         const audio = getPersistentAudio();
         usingNativeAudioRef.current = true;
 
+        // Clear previously registered native-audio listeners before attaching
+        // a new set for the next track to avoid duplicate callbacks.
+        for (const { event, handler } of audioListenersRef.current) {
+          audio.removeEventListener(event, handler);
+        }
+        audioListenersRef.current = [];
+
         // ── FIX 2b: src swap only — DO NOT call audio.load() ────────────
         // audio.load() resets the user-gesture unlock. Setting src directly
         // preserves the gesture token from the first user tap.
@@ -422,21 +435,25 @@ export function PlayerBar() {
         const onError = () => {
           console.warn("[player] Native audio error, falling back to iframe");
           usingNativeAudioRef.current = false;
-          audio.removeEventListener("play", onPlay);
-          audio.removeEventListener("pause", onPause);
-          audio.removeEventListener("ended", onEnded);
-          audio.removeEventListener("timeupdate", onTimeUpdate);
-          audio.removeEventListener("loadedmetadata", onLoadedMetadata);
-          audio.removeEventListener("error", onError);
+          for (const { event, handler } of audioListenersRef.current) {
+            audio.removeEventListener(event, handler);
+          }
+          audioListenersRef.current = [];
           fallbackToIframe();
         };
 
-        audio.addEventListener("play", onPlay);
-        audio.addEventListener("pause", onPause);
-        audio.addEventListener("ended", onEnded);
-        audio.addEventListener("timeupdate", onTimeUpdate);
-        audio.addEventListener("loadedmetadata", onLoadedMetadata);
-        audio.addEventListener("error", onError);
+        const listeners: AudioListener[] = [
+          { event: "play", handler: onPlay as EventListener },
+          { event: "pause", handler: onPause as EventListener },
+          { event: "ended", handler: onEnded as EventListener },
+          { event: "timeupdate", handler: onTimeUpdate as EventListener },
+          { event: "loadedmetadata", handler: onLoadedMetadata as EventListener },
+          { event: "error", handler: onError as EventListener },
+        ];
+        for (const { event, handler } of listeners) {
+          audio.addEventListener(event, handler);
+        }
+        audioListenersRef.current = listeners;
 
         await audio.play();
         setAudioLoading(false);
@@ -447,14 +464,6 @@ export function PlayerBar() {
           playerRef.current.loadVideoById(videoId);
         }
 
-        abortController.signal.addEventListener("abort", () => {
-          audio.removeEventListener("play", onPlay);
-          audio.removeEventListener("pause", onPause);
-          audio.removeEventListener("ended", onEnded);
-          audio.removeEventListener("timeupdate", onTimeUpdate);
-          audio.removeEventListener("loadedmetadata", onLoadedMetadata);
-          audio.removeEventListener("error", onError);
-        });
       } catch (err) {
         if (abortController.signal.aborted) return;
         console.warn("[player] Native audio fetch failed, falling back to iframe:", err);
@@ -476,6 +485,11 @@ export function PlayerBar() {
 
     return () => {
       abortController.abort();
+      const audio = getPersistentAudio();
+      for (const { event, handler } of audioListenersRef.current) {
+        audio.removeEventListener(event, handler);
+      }
+      audioListenersRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSong?.youtube_video_id, currentSong?.id]);
