@@ -40,6 +40,7 @@ class AudioEngine {
   private upcomingTracks: EngineTrack[] = [];
   private upcomingStreamUrls = new Map<string, string>();
   private urlRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   // Monotonic counter — bumped on every playSong call so stale async continuations can self-abort
   private playGeneration = 0;
   // Throttle setPositionState calls in timeupdate (~every 1 s is enough for the notification)
@@ -160,6 +161,9 @@ class AudioEngine {
       this.directTransitionVideoId = null;
       return;
     }
+    // A different song was requested — clear any stale guard so it can never
+    // accidentally match a future playSong call.
+    this.directTransitionVideoId = null;
 
     // Bump generation so any in-flight call for a previous song aborts itself
     const generation = ++this.playGeneration;
@@ -274,6 +278,7 @@ class AudioEngine {
     this.attachEvents();
     this.initMediaSessionOnce();
     this.initVisibilityHandler();
+    this.initHeartbeat();
     return element;
   }
 
@@ -281,8 +286,11 @@ class AudioEngine {
     if (!this.audio) return;
 
     this.audio.addEventListener("play", () => {
-      // Clear the direct-transition guard once the audio element confirms playback
-      this.directTransitionVideoId = null;
+      // NOTE: directTransitionVideoId is intentionally NOT cleared here.
+      // The play event can fire before React's state-update cycle completes and
+      // the playSong() guard runs. Clearing it here would let the React effect's
+      // playSong() call restart the song mid-play (and re-run updateMediaSession,
+      // killing the notification again). playSong() clears the guard itself.
 
       this.callbacks.onPlayStateChange?.(true);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
@@ -464,12 +472,12 @@ class AudioEngine {
 
     const session = navigator.mediaSession;
 
-    // Step 1: Signal "nothing playing" — makes Android drop the current notification
-    // entirely before creating a fresh one for the new track. iOS also benefits.
-    session.playbackState = "none";
-    session.metadata = null;
-
-    // Step 2: Install new track metadata
+    // Update metadata in-place — do NOT set playbackState="none" or metadata=null.
+    // Android interprets playbackState="none" as the session ending, which:
+    //   1. Drops the lock-screen notification immediately.
+    //   2. Causes the next audio.play() to be treated as a new background autoplay
+    //      request (throttled/blocked) rather than a continuation of an active session.
+    // Updating metadata directly keeps the notification alive across track transitions.
     session.metadata = new MediaMetadata({
       title: track.title,
       artist: track.artist ?? "Pulsebox",
@@ -478,11 +486,14 @@ class AudioEngine {
         : [],
     });
 
-    // Step 3: Mark as playing
     session.playbackState = "playing";
 
-    // Step 4: Reset the seek bar to 0 — required on Android Chrome for the
-    // notification to display a fresh progress bar for the new track.
+    // Re-register action handlers on every track — Android Chrome can silently
+    // drop them after the page is backgrounded or the screen is locked.
+    this.mediaSessionInitialized = false;
+    this.initMediaSessionOnce();
+
+    // Reset the seek bar to 0 for the new track.
     this.setPositionState(0, 0);
   }
 
@@ -497,6 +508,20 @@ class AudioEngine {
     } catch {
       // setPositionState is not universally supported; safe to ignore
     }
+  }
+
+  /**
+   * Periodically assert playbackState="playing" while audio is active.
+   * Chrome Android aggressively suspends media sessions it considers inactive;
+   * this heartbeat keeps the lock-screen notification alive between tracks.
+   */
+  private initHeartbeat(): void {
+    if (this.heartbeatInterval) return;
+    this.heartbeatInterval = setInterval(() => {
+      if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+      if (!this.audio || this.audio.paused) return;
+      navigator.mediaSession.playbackState = "playing";
+    }, 5_000);
   }
 
   private initVisibilityHandler(): void {
