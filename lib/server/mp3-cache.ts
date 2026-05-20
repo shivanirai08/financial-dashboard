@@ -259,16 +259,37 @@ async function resolveProviderStream(videoId: string): Promise<ProviderResult> {
 }
 
 async function downloadAudio(url: string): Promise<{ bytes: Uint8Array; sizeBytes: number }> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Audio download failed with ${res.status}`);
+  const maxRetries = 2;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength === 0) {
+        throw new Error("Empty response body");
+      }
+
+      return {
+        bytes: new Uint8Array(arrayBuffer),
+        sizeBytes: arrayBuffer.byteLength,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < maxRetries) {
+        // Wait 500ms before retry
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
   }
 
-  const arrayBuffer = await res.arrayBuffer();
-  return {
-    bytes: new Uint8Array(arrayBuffer),
-    sizeBytes: arrayBuffer.byteLength,
-  };
+  throw new Error(
+    `Audio download failed after ${maxRetries + 1} attempts: ${lastError?.message ?? "Unknown error"}`
+  );
 }
 
 async function deleteCacheObject(objectPath: string): Promise<void> {
@@ -383,27 +404,58 @@ export async function resolveMp3Link(
     await supabase.from("yt_mp3_cache_index").delete().eq("video_id", videoId);
   }
 
-  const resolved = await resolveProviderStream(videoId);
-  const audio = await downloadAudio(resolved.streamUrl);
+  // Try to get a working provider stream with retry fallback
+  let resolvedStream: ProviderResult | null = null;
+  const enabledProviders = PROVIDER_ORDER.filter(
+    (provider) => provider === "youtube-mp36" || provider === "youtube-mp3-2025"
+  );
 
-  await ensureCapacity(audio.sizeBytes, videoId);
+  for (const provider of enabledProviders) {
+    try {
+      const allowed = await canUseProvider(provider);
+      if (!allowed) continue;
 
-  const { error: uploadError } = await supabase.storage
-    .from(CACHE_BUCKET)
-    .upload(objectPath, audio.bytes, { upsert: true, contentType: "audio/mpeg" });
+      await incrementProviderUsage(provider);
+      resolvedStream = await fetchFromProvider(provider, videoId);
 
-  if (uploadError) {
-    throw new Error(`Cache upload failed: ${uploadError.message}`);
+      // Verify the stream URL is actually accessible
+      try {
+        const audio = await downloadAudio(resolvedStream.streamUrl);
+        await ensureCapacity(audio.sizeBytes, videoId);
+
+        const { error: uploadError } = await supabase.storage
+          .from(CACHE_BUCKET)
+          .upload(objectPath, audio.bytes, { upsert: true, contentType: "audio/mpeg" });
+
+        if (uploadError) {
+          throw new Error(`Cache upload failed: ${uploadError.message}`);
+        }
+
+        await writeCacheIndex(videoId, objectPath, audio.sizeBytes, provider);
+
+        return {
+          status: "ok",
+          link: buildPublicUrl(objectPath),
+          cached: true,
+          provider,
+        };
+      } catch (downloadError) {
+        // This provider's URL failed to download; try next provider
+        console.warn(
+          `Provider ${provider} stream download failed for ${videoId}:`,
+          downloadError instanceof Error ? downloadError.message : String(downloadError)
+        );
+        continue;
+      }
+    } catch (error) {
+      // Provider fetch failed; try next
+      continue;
+    }
   }
 
-  await writeCacheIndex(videoId, objectPath, audio.sizeBytes, resolved.provider);
-
-  return {
-    status: "ok",
-    link: buildPublicUrl(objectPath),
-    cached: false,
-    provider: resolved.provider,
-  };
+  throw new Error(
+    `All providers failed to provide a downloadable stream for ${videoId}`
+  );
 }
 
 export async function prefetchQueueMp3(videoIds: string[]) {

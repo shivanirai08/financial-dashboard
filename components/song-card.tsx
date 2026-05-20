@@ -25,6 +25,7 @@ export function SongCard({ song, index }: SongCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [showMobileActions, setShowMobileActions] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [playLoading, setPlayLoading] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const addToast = useToastStore((s) => s.addToast);
@@ -49,17 +50,37 @@ export function SongCard({ song, index }: SongCardProps) {
   }, [menuOpen]);
 
   function handlePlay() {
-    if (hasVideo) playAtIndex(index);
+    if (hasVideo) {
+      setPlayLoading(true);
+      // Fetch stream URL before starting playback
+      fetch(`/api/youtube/audio-mp3/${storeVideo}?flow=cache`)
+        .catch(() => {
+          // Silently fail — let playback proceed even if prewarm fails
+        })
+        .finally(() => {
+          playAtIndex(index);
+          setPlayLoading(false);
+        });
+    }
   }
 
   function handleWatchVideo(e: React.MouseEvent) {
     e.stopPropagation();
-    playAtIndex(index);
-    if (!isActive) {
-      setTimeout(() => toggleVideo(), 100);
-    } else {
-      toggleVideo();
-    }
+    setPlayLoading(true);
+    // Fetch stream URL before starting playback
+    fetch(`/api/youtube/audio-mp3/${storeVideo}?flow=cache`)
+      .catch(() => {
+        // Silently fail — let playback proceed even if prewarm fails
+      })
+      .finally(() => {
+        playAtIndex(index);
+        if (!isActive) {
+          setTimeout(() => toggleVideo(), 100);
+        } else {
+          toggleVideo();
+        }
+        setPlayLoading(false);
+      });
   }
 
   function handleOpenActions(e: React.MouseEvent) {
@@ -112,14 +133,16 @@ export function SongCard({ song, index }: SongCardProps) {
   return (
     <>
       <article
-        onClick={handlePlay}
+        onClick={playLoading ? undefined : handlePlay}
         className={`group relative grid w-full max-w-full grid-cols-[auto_minmax(0,1fr)_44px] items-center gap-2 rounded-2xl border p-2.5 transition-all duration-200 hover:border-white/20 hover:bg-white/[0.06] sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-3 sm:p-3 ${
           isActive
             ? "border-cyan-400/35 bg-cyan-400/[0.04]"
             : removing
             ? "border-rose-500/20 bg-rose-500/5 opacity-50"
+            : playLoading
+            ? "border-blue-400/35 bg-blue-400/[0.04]"
             : "border-white/[0.07] bg-white/[0.02]"
-        } ${!hasVideo ? "cursor-default" : ""}`}
+        } ${!hasVideo ? "cursor-default" : playLoading ? "cursor-wait" : ""}`}
       >
         {/* Thumbnail / Placeholder */}
         <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-xl bg-slate-800 sm:h-14 sm:w-14">
