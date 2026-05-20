@@ -1,42 +1,46 @@
 # Pulsebox Stream Backend
 
-A dedicated Node.js backend for long-lived YouTube audio extraction + proxy streaming.
+A persistent Node.js backend for YouTube audio URL extraction using `yt-dlp-wrap`.
 
-## Why this exists
+## Architecture
 
-Serverless platforms often suspend long-running media proxy requests. This backend is designed to run on a persistent Node host (Render) so Android Chrome background playback is more stable.
+- Extract with `yt-dlp` (`-J`, best audio format filter)
+- Pick mobile-friendly audio-only format (prefers m4a/webm)
+- Validate URL before returning
+- Return direct `streamUrl` for frontend playback
 
 ## Endpoints
 
-- `GET /health` -> health check
-- `GET /api/youtube/audio/:videoId` -> returns `{ "url": "..." }`
-- `GET /api/stream/:videoId` -> streams audio (supports `Range` header)
+- `GET /health` -> health + extractor info
+- `GET /api/youtube/audio/:videoId` -> returns `{ "streamUrl": "...", "url": "..." }`
+- `GET /api/stream/:videoId` -> compatibility proxy stream route (supports `Range`)
+
+## Notes
+
+- `streamUrl` links are short-lived; cache TTL is intentionally limited.
+- Backend revalidates cached URLs before reuse to reduce stale-link 404s.
+- Frontend should use direct playback (`audio.src = streamUrl`) from `/api/youtube/audio/:videoId`.
 
 ## Run locally
 
-1. Copy `.env.example` to `.env`.
-2. Install dependencies:
+1. Install dependencies:
    ```bash
    npm install
    ```
-3. Start server:
+2. Start server:
    ```bash
    npm run dev
    ```
 
-Default local port: `8080`.
+Default port: `8080`.
 
 ## Render deploy
-
-Use `render.yaml` from this folder or configure manually:
 
 - Root Directory: `backend`
 - Build Command: `npm install`
 - Start Command: `npm start`
 - Node version: `20`
 
-After deploy, set frontend env:
+Set frontend env:
 
 - `NEXT_PUBLIC_STREAM_BACKEND_URL=https://your-render-service.onrender.com`
-
-Then restart your Next.js frontend.

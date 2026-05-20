@@ -1,231 +1,130 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Innertube } from "youtubei.js";
+import YTDlpWrap from "yt-dlp-wrap";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-const SOURCE_TIMEOUT_MS = 3500;
-const INVIDIOUS_DISCOVERY_TTL_MS = 60 * 60 * 1000;
-
-type PipedAudioStream = {
+type ExtractedFormat = {
+  acodec?: string;
+  vcodec?: string;
+  ext?: string;
+  abr?: number;
+  tbr?: number;
   url?: string;
-  mimeType?: string;
-  bitrate?: number;
 };
 
-type InvidiousInstanceRow = [string, { api?: boolean; uri?: string; monitor?: { uptime?: number } }];
-
-type InvidiousVideoFormat = {
-  type?: string;
-  url?: string;
-  bitrate?: number;
+type ExtractedInfo = {
+  formats?: ExtractedFormat[];
 };
 
-let cachedInvidiousInstances: string[] = [];
-let invidiousCachedAt = 0;
+const REQUEST_TIMEOUT_MS = 5000;
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const YTDLP_BIN_PATH = process.env.YTDLP_PATH || "/tmp/yt-dlp";
 
-// Cache Innertube instance (expensive to create)
-let innertubeInstance: Awaited<ReturnType<typeof Innertube.create>> | null =
-  null;
-let instanceCreatedAt = 0;
-const INSTANCE_TTL = 30 * 60 * 1000; // 30 minutes
+const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
+let ytDlpReadyPromise: Promise<void> | null = null;
 
-async function getInnertube() {
-  const now = Date.now();
-  if (!innertubeInstance || now - instanceCreatedAt > INSTANCE_TTL) {
-    innertubeInstance = await Innertube.create({
-      retrieve_player: true,
-      generate_session_locally: true,
+const audioUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
+
+async function ensureYtDlpReady() {
+  if (process.env.YTDLP_PATH) return;
+
+  if (!ytDlpReadyPromise) {
+    ytDlpReadyPromise = YTDlpWrap.downloadFromGithub(YTDLP_BIN_PATH).then(() => {
+      // Binary downloaded and executable.
     });
-    instanceCreatedAt = now;
   }
-  return innertubeInstance;
+
+  await ytDlpReadyPromise;
 }
 
-// Simple in-memory cache for audio URLs (they last ~6 hours)
-const audioUrlCache = new Map<string, { url: string; expires: number }>();
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-// Piped API instances (fallback for datacenter IPs where YouTube blocks streaming data)
-const PIPED_INSTANCES = [
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi.adminforge.de",
-  "https://pipedapi.in.projectsegfau.lt",
-  "https://api.piped.privacydevs.net",
-  "https://pipedapi.darkness.services",
-];
-
-async function getAudioFromPiped(videoId: string): Promise<string | null> {
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
-
-      console.log(`[audio/${videoId}] Trying Piped instance: ${instance}`);
-
-      const res = await fetch(`${instance}/streams/${videoId}`, {
-        signal: controller.signal,
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-      clearTimeout(timeout);
-
-      if (!res.ok) {
-        continue;
-      }
-
-      const data = (await res.json()) as { audioStreams?: PipedAudioStream[] };
-      const audioStreams = data.audioStreams;
-
-      if (!audioStreams || audioStreams.length === 0) {
-        continue;
-      }
-
-      const sorted = audioStreams
-        .filter((s) => s.url)
-        .sort(
-          (a, b) => {
-            const aIsMp4 = a.mimeType?.includes("mp4") ? 1 : 0;
-            const bIsMp4 = b.mimeType?.includes("mp4") ? 1 : 0;
-            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
-          }
-        );
-
-      if (sorted.length > 0 && sorted[0].url) {
-        console.log(`[audio/${videoId}] Got audio from Piped ${instance}`);
-        return sorted[0].url;
-      }
-    } catch {
-      continue;
-    }
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      cache: "no-store",
+    });
+  } finally {
+    clearTimeout(timeout);
   }
-  return null;
 }
 
-async function getInvidiousInstances(): Promise<string[]> {
-  if (cachedInvidiousInstances.length > 0 && Date.now() - invidiousCachedAt < INVIDIOUS_DISCOVERY_TTL_MS) {
-    return cachedInvidiousInstances;
+async function isPlayableStreamUrl(streamUrl: string): Promise<boolean> {
+  try {
+    const head = await fetchWithTimeout(streamUrl, {
+      method: "HEAD",
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (head.ok) return true;
+  } catch {
+    // Some sources reject HEAD; fallback below.
   }
 
-  const res = await fetch("https://api.invidious.io/instances.json", {
-    next: { revalidate: 3600 },
+  try {
+    const ranged = await fetchWithTimeout(streamUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Range: "bytes=0-0",
+      },
+    });
+    return ranged.ok || ranged.status === 206;
+  } catch {
+    return false;
+  }
+}
+
+function pickBestAudioFormat(formats: ExtractedFormat[]): ExtractedFormat | null {
+  const audioOnly = formats.filter((format) => {
+    if (!format.url) return false;
+    if (!format.acodec || format.acodec === "none") return false;
+    if (format.vcodec && format.vcodec !== "none") return false;
+    return true;
   });
-  if (!res.ok) return [];
 
-  const data = (await res.json()) as InvidiousInstanceRow[];
-  const instances = data
-    .filter((row) => row[1]?.api === true && !!row[1]?.uri)
-    .sort((a, b) => (b[1]?.monitor?.uptime ?? 0) - (a[1]?.monitor?.uptime ?? 0))
-    .map((row) => row[1].uri as string)
-    .slice(0, 4);
+  const extRank: Record<string, number> = {
+    m4a: 3,
+    mp4: 3,
+    webm: 2,
+    opus: 2,
+    mp3: 1,
+  };
 
-  cachedInvidiousInstances = instances;
-  invidiousCachedAt = Date.now();
-  return instances;
+  audioOnly.sort((a, b) => {
+    const aExt = extRank[(a.ext || "").toLowerCase()] || 0;
+    const bExt = extRank[(b.ext || "").toLowerCase()] || 0;
+    if (aExt !== bExt) return bExt - aExt;
+    return (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0);
+  });
+
+  return audioOnly[0] ?? null;
 }
 
-async function getAudioFromInvidious(videoId: string): Promise<string | null> {
-  try {
-    const instances = await getInvidiousInstances();
+async function extractStreamUrl(videoId: string): Promise<string | null> {
+  await ensureYtDlpReady();
 
-    for (const instance of instances) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
+  const output = await ytDlpWrap.execPromise([
+    `https://www.youtube.com/watch?v=${videoId}`,
+    "-J",
+    "--no-playlist",
+    "--no-warnings",
+    "--skip-download",
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+  ]);
 
-        console.log(`[audio/${videoId}] Trying Invidious instance: ${instance}`);
-        const vidRes = await fetch(`${instance}/api/v1/videos/${videoId}`, {
-          signal: controller.signal,
-          headers: { "User-Agent": "Mozilla/5.0" },
-        });
-        clearTimeout(timeout);
+  const parsed = JSON.parse(output) as ExtractedInfo;
+  const best = pickBestAudioFormat(parsed.formats ?? []);
+  if (!best?.url) return null;
 
-        if (!vidRes.ok) continue;
+  const valid = await isPlayableStreamUrl(best.url);
+  if (!valid) return null;
 
-        const vidData = (await vidRes.json()) as {
-          adaptiveFormats?: InvidiousVideoFormat[];
-          formatStreams?: InvidiousVideoFormat[];
-        };
-        const audioStreams = vidData.adaptiveFormats || vidData.formatStreams || [];
-
-        const sorted = audioStreams
-          .filter((s) => !!s.type && !!s.url && (s.type.includes("audio/mp4") || s.type.includes("audio/webm")))
-          .sort((a, b) => {
-            const aIsMp4 = a.type?.includes("mp4") ? 1 : 0;
-            const bIsMp4 = b.type?.includes("mp4") ? 1 : 0;
-            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
-          });
-
-        if (sorted.length > 0 && sorted[0].url) {
-          console.log(`[audio/${videoId}] Got audio from Invidious ${instance}`);
-          return sorted[0].url;
-        }
-      } catch {
-        continue;
-      }
-    }
-  } catch (err) {
-    console.error(`[audio/${videoId}] Invidious fallback failed`, err);
-  }
-  return null;
-}
-
-async function extractWithInnertube(
-  videoId: string
-): Promise<string | null> {
-  try {
-    const yt = await getInnertube();
-
-    // Try clients in order of reliability
-    const clients = ["WEB_EMBEDDED", "ANDROID", "IOS", "WEB", "TV_EMBEDDED"] as const;
-
-    for (const client of clients) {
-      try {
-        console.log(`[audio/${videoId}] Trying Innertube client: ${client}`);
-        const info = await yt.getInfo(videoId, { client });
-
-        if (!info.streaming_data) {
-          continue;
-        }
-
-        const adaptiveFormats =
-          info.streaming_data.adaptive_formats ?? [];
-        const audioFormats = adaptiveFormats
-          .filter((f) => f.mime_type?.startsWith("audio/"))
-          .sort((a, b) => {
-            const aIsMp4 = a.mime_type?.includes("mp4a") ? 1 : 0;
-            const bIsMp4 = b.mime_type?.includes("mp4a") ? 1 : 0;
-            if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
-            return (b.bitrate ?? 0) - (a.bitrate ?? 0);
-          });
-
-        if (audioFormats.length === 0) {
-          continue;
-        }
-
-        console.log(
-          `[audio/${videoId}] Innertube ${client} has ${audioFormats.length} audio formats, deciphering best...`
-        );
-        const audioUrl = await audioFormats[0].decipher(yt.session.player);
-
-        if (audioUrl) {
-          console.log(
-            `[audio/${videoId}] Got audio URL from Innertube ${client}`
-          );
-          return audioUrl;
-        }
-      } catch {
-        continue;
-      }
-    }
-  } catch (e) {
-    console.warn(
-      `[audio/${videoId}] Innertube initialization failed:`,
-      (e as Error).message.substring(0, 100)
-    );
-    innertubeInstance = null;
-  }
-  return null;
+  return best.url;
 }
 
 export async function GET(
@@ -238,51 +137,43 @@ export async function GET(
     return NextResponse.json({ error: "Invalid video ID" }, { status: 400 });
   }
 
-  // Check cache first
   const cached = audioUrlCache.get(videoId);
-  if (cached && cached.expires > Date.now()) {
-    console.log(`[audio/${videoId}] Cache hit`);
-    return NextResponse.json({ streamUrl: cached.url, url: cached.url });
+  if (cached && cached.expiresAt > Date.now()) {
+    const stillValid = await isPlayableStreamUrl(cached.streamUrl);
+    if (stillValid) {
+      return NextResponse.json({ streamUrl: cached.streamUrl, url: cached.streamUrl });
+    }
+
+    audioUrlCache.delete(videoId);
   }
 
-  console.log(`[audio/${videoId}] Cache miss, fetching...`);
-
-  // Try Innertube first (works on residential IPs / localhost)
-  let audioUrl = await extractWithInnertube(videoId);
-
-  // Fallback to Invidious API
-  if (!audioUrl) {
-    console.log(`[audio/${videoId}] Innertube failed, attempting Invidious API...`);
-    audioUrl = await getAudioFromInvidious(videoId);
-  }
-
-  // Fallback to Piped API
-  if (!audioUrl) {
-    console.log(`[audio/${videoId}] Invidious failed, attempting Piped API...`);
-    audioUrl = await getAudioFromPiped(videoId);
+  let audioUrl: string | null = null;
+  try {
+    audioUrl = await extractStreamUrl(videoId);
+  } catch (error) {
+    console.error(
+      `[audio/${videoId}] yt-dlp extraction failed:`,
+      error instanceof Error ? error.message : "unknown error"
+    );
   }
 
   if (!audioUrl) {
-    console.error(`[audio/${videoId}] All extraction methods failed`);
+    console.error(`[audio/${videoId}] No playable URL extracted by yt-dlp`);
     return NextResponse.json(
       { error: "No streaming data available for this video" },
       { status: 404 }
     );
   }
 
-  console.log(`[audio/${videoId}] Successfully extracted audio URL`);
-
-  // Cache for 5 hours
   audioUrlCache.set(videoId, {
-    url: audioUrl,
-    expires: Date.now() + 5 * 60 * 60 * 1000,
+    streamUrl: audioUrl,
+    expiresAt: Date.now() + CACHE_TTL_MS,
   });
 
-  // Clean old cache entries
-  if (audioUrlCache.size > 200) {
+  if (audioUrlCache.size > 400) {
     const now = Date.now();
     for (const [key, val] of audioUrlCache) {
-      if (val.expires < now) audioUrlCache.delete(key);
+      if (val.expiresAt < now) audioUrlCache.delete(key);
     }
   }
 

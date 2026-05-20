@@ -1,6 +1,5 @@
 import { createServerSupabase } from "@/lib/supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { slugify } from "@/lib/slug";
 
 type Params = { params: Promise<{ id: string }> };
 

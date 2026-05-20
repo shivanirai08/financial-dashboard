@@ -20,6 +20,7 @@ type EngineCallbacks = {
 
 const STREAM_BACKEND_BASE =
   process.env.NEXT_PUBLIC_STREAM_BACKEND_URL?.replace(/\/$/, "") ?? "";
+const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 
 class AudioEngine {
   private audio: HTMLAudioElement | null = null;
@@ -27,7 +28,7 @@ class AudioEngine {
   private currentTrack: EngineTrack | null = null;
   private nextTrack: EngineTrack | null = null;
   private nextStreamUrl: string | null = null;
-  private streamUrlCache = new Map<string, string>();
+  private streamUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
   private preloadRequested = new Set<string>();
   private mediaSessionInitialized = false;
   private gestureUnlocked = false;
@@ -67,6 +68,11 @@ class AudioEngine {
       streamUrl = this.nextStreamUrl;
     } else {
       streamUrl = await this.resolveStreamUrl(track.videoId);
+    }
+
+    const reachable = await this.isPlayableStreamUrl(streamUrl);
+    if (!reachable) {
+      streamUrl = await this.resolveStreamUrl(track.videoId, true);
     }
 
     if (audio.src !== streamUrl) {
@@ -270,9 +276,11 @@ class AudioEngine {
     }
   }
 
-  private async resolveStreamUrl(videoId: string): Promise<string> {
+  private async resolveStreamUrl(videoId: string, forceRefresh = false): Promise<string> {
     const cached = this.streamUrlCache.get(videoId);
-    if (cached) return cached;
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+      return cached.streamUrl;
+    }
 
     const primaryEndpoint = STREAM_BACKEND_BASE
       ? `${STREAM_BACKEND_BASE}/api/youtube/audio/${videoId}`
@@ -295,8 +303,36 @@ class AudioEngine {
       throw new Error("Resolver response missing streamUrl");
     }
 
-    this.streamUrlCache.set(videoId, streamUrl);
+    this.streamUrlCache.set(videoId, {
+      streamUrl,
+      expiresAt: Date.now() + STREAM_URL_CACHE_TTL_MS,
+    });
     return streamUrl;
+  }
+
+  private async isPlayableStreamUrl(streamUrl: string): Promise<boolean> {
+    try {
+      const head = await fetch(streamUrl, {
+        method: "HEAD",
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (head.ok) return true;
+    } catch {
+      // Some providers reject HEAD.
+    }
+
+    try {
+      const range = await fetch(streamUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Range: "bytes=0-0",
+        },
+      });
+      return range.ok || range.status === 206;
+    } catch {
+      return false;
+    }
   }
 
   private toEngineTrack(song: DbSong): EngineTrack {

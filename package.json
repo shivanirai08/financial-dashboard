@@ -16,6 +16,7 @@
     "next": "16.2.2",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "yt-dlp-wrap": "^2.3.12",
     "youtubei.js": "^17.0.1",
     "yt-search": "^2.13.1",
     "zustand": "^5.0.13"

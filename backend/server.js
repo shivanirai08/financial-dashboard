@@ -1,244 +1,161 @@
-const express = require("express");
-const cors = require("cors");
-const { Innertube } = require("youtubei.js");
+import { Readable } from "node:stream";
+import cors from "cors";
+import express from "express";
+import YTDlpWrap from "yt-dlp-wrap";
 
 const app = express();
 
 const PORT = Number(process.env.PORT || 8080);
-const SOURCE_TIMEOUT_MS = Number(process.env.SOURCE_TIMEOUT_MS || 4500);
-const INVIDIOUS_DISCOVERY_TTL_MS = Number(
-  process.env.INVIDIOUS_DISCOVERY_TTL_MS || 60 * 60 * 1000
-);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+const REQUEST_TIMEOUT_MS = Number(process.env.SOURCE_TIMEOUT_MS || 5000);
+const CACHE_TTL_MS = Number(process.env.STREAM_URL_CACHE_TTL_MS || 60 * 60 * 1000);
+const YTDLP_BIN_PATH = process.env.YTDLP_PATH || "/tmp/yt-dlp";
+
+const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
+let ytDlpReadyPromise = null;
+
+const streamUrlCache = new Map();
 
 app.use(cors({ origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN }));
 app.use(express.json());
-
-const PIPED_INSTANCES = [
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi.adminforge.de",
-  "https://pipedapi.in.projectsegfau.lt",
-  "https://api.piped.privacydevs.net",
-  "https://pipedapi.darkness.services",
-];
-
-let innertubeInstance = null;
-let instanceCreatedAt = 0;
-const INSTANCE_TTL_MS = 30 * 60 * 1000;
-
-let cachedInvidiousInstances = [];
-let invidiousCachedAt = 0;
-
-function isHttpUrl(value) {
-  return typeof value === "string" && /^https?:\/\//.test(value);
-}
 
 function isValidVideoId(videoId) {
   return typeof videoId === "string" && /^[a-zA-Z0-9_-]{11}$/.test(videoId);
 }
 
-async function getInnertube() {
-  const now = Date.now();
-  if (!innertubeInstance || now - instanceCreatedAt > INSTANCE_TTL_MS) {
-    innertubeInstance = await Innertube.create({
-      retrieve_player: true,
-      generate_session_locally: true,
+async function ensureYtDlpReady() {
+  if (process.env.YTDLP_PATH) return;
+
+  if (!ytDlpReadyPromise) {
+    ytDlpReadyPromise = YTDlpWrap.downloadFromGithub(YTDLP_BIN_PATH).then(() => {
+      // Binary downloaded.
     });
-    instanceCreatedAt = now;
-  }
-  return innertubeInstance;
-}
-
-async function getInvidiousInstances() {
-  if (
-    cachedInvidiousInstances.length > 0 &&
-    Date.now() - invidiousCachedAt < INVIDIOUS_DISCOVERY_TTL_MS
-  ) {
-    return cachedInvidiousInstances;
   }
 
-  try {
-    const res = await fetch("https://api.invidious.io/instances.json", {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      const instances = data
-        .filter((row) => row?.[1]?.api === true && !!row?.[1]?.uri)
-        .sort((a, b) => (b?.[1]?.monitor?.uptime || 0) - (a?.[1]?.monitor?.uptime || 0))
-        .map((row) => row[1].uri)
-        .slice(0, 8);
-
-      if (instances.length > 0) {
-        cachedInvidiousInstances = instances;
-        invidiousCachedAt = Date.now();
-      }
-    }
-  } catch {
-    // Keep stale cache if discovery fails.
-  }
-
-  if (cachedInvidiousInstances.length > 0) {
-    return cachedInvidiousInstances;
-  }
-
-  return [
-    "https://inv.nadeko.net",
-    "https://invidious.projectsegfau.lt",
-    "https://invidious.privacyredirect.com",
-  ];
-}
-
-async function resolveInnertubeAudioUrl(yt, videoId, client) {
-  const info = await yt.getInfo(videoId, { client });
-  const adaptiveFormats = info?.streaming_data?.adaptive_formats || [];
-  const regularFormats = info?.streaming_data?.formats || [];
-  const allFormats = [...adaptiveFormats, ...regularFormats];
-  if (allFormats.length === 0) return null;
-
-  const audioFormats = allFormats
-    .filter((f) => {
-      const mime = f?.mime_type || "";
-      return mime.startsWith("audio/") || mime.includes("audio/");
-    })
-    .sort((a, b) => {
-      const aIsMp4 = a?.mime_type?.includes("mp4a") ? 1 : 0;
-      const bIsMp4 = b?.mime_type?.includes("mp4a") ? 1 : 0;
-      return bIsMp4 - aIsMp4 || (b?.bitrate || 0) - (a?.bitrate || 0);
-    });
-
-  for (const format of audioFormats) {
-    if (isHttpUrl(format?.url)) return format.url;
-    try {
-      const deciphered = await format.decipher(yt.session.player);
-      if (isHttpUrl(deciphered)) return deciphered;
-    } catch {
-      // Try next format.
-    }
-  }
-
-  // Some videos only expose muxed A/V formats for certain clients.
-  // As a final Innertube attempt, pick highest bitrate format containing audio.
-  const muxedFormats = allFormats
-    .filter((f) => {
-      const mime = f?.mime_type || "";
-      return mime.includes("audio/");
-    })
-    .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0));
-
-  for (const format of muxedFormats) {
-    if (isHttpUrl(format?.url)) return format.url;
-    try {
-      const deciphered = await format.decipher(yt.session.player);
-      if (isHttpUrl(deciphered)) return deciphered;
-    } catch {
-      // Try next format.
-    }
-  }
-
-  return null;
+  await ytDlpReadyPromise;
 }
 
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   try {
     return await fetch(url, {
       ...options,
       signal: controller.signal,
+      cache: "no-store",
     });
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function getAudioUrl(videoId) {
+async function isPlayableStreamUrl(streamUrl) {
   try {
-    const yt = await getInnertube();
-    const clients = ["WEB_EMBEDDED", "ANDROID", "IOS", "WEB", "TV_EMBEDDED"];
-
-    for (const client of clients) {
-      try {
-        console.log(`[stream/${videoId}] Innertube: ${client}`);
-        const url = await resolveInnertubeAudioUrl(yt, videoId, client);
-        if (url) {
-          console.log(`[stream/${videoId}] Got URL from Innertube ${client}`);
-          return url;
-        }
-      } catch {
-        // Continue with next client.
-      }
-    }
-  } catch (e) {
-    console.warn(
-      `[stream/${videoId}] Innertube failed:`,
-      (e && e.message ? e.message : "unknown error").toString().slice(0, 120)
-    );
-    innertubeInstance = null;
+    const head = await fetchWithTimeout(streamUrl, {
+      method: "HEAD",
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (head.ok) return true;
+  } catch {
+    // Some sources reject HEAD.
   }
 
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      console.log(`[stream/${videoId}] Piped: ${instance}`);
-      const res = await fetchWithTimeout(`${instance}/streams/${videoId}`, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-      if (!res.ok) continue;
+  try {
+    const probe = await fetchWithTimeout(streamUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Range: "bytes=0-0",
+      },
+    });
+    return probe.ok || probe.status === 206;
+  } catch {
+    return false;
+  }
+}
 
-      const data = await res.json();
-      const candidates = [
-        ...(data?.audioStreams || []),
-        ...(data?.adaptiveFormats || []),
-      ]
-        .filter((s) => isHttpUrl(s?.url))
-        .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0));
+function pickBestAudioFormat(formats) {
+  const audioOnly = (formats || []).filter((format) => {
+    if (!format?.url) return false;
+    if (!format?.acodec || format.acodec === "none") return false;
+    if (format?.vcodec && format.vcodec !== "none") return false;
+    return true;
+  });
 
-      if (candidates[0]?.url) {
-        console.log(`[stream/${videoId}] Got URL from Piped ${instance}`);
-        return candidates[0].url;
-      }
-    } catch {
-      // Continue with next instance.
+  const extRank = {
+    m4a: 3,
+    mp4: 3,
+    webm: 2,
+    opus: 2,
+    mp3: 1,
+  };
+
+  audioOnly.sort((a, b) => {
+    const aExt = extRank[(a.ext || "").toLowerCase()] || 0;
+    const bExt = extRank[(b.ext || "").toLowerCase()] || 0;
+    if (aExt !== bExt) return bExt - aExt;
+    return (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0);
+  });
+
+  return audioOnly[0] || null;
+}
+
+async function extractStreamUrl(videoId) {
+  await ensureYtDlpReady();
+
+  const output = await ytDlpWrap.execPromise([
+    `https://www.youtube.com/watch?v=${videoId}`,
+    "-J",
+    "--no-playlist",
+    "--no-warnings",
+    "--skip-download",
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+  ]);
+
+  const parsed = JSON.parse(output);
+  const best = pickBestAudioFormat(parsed?.formats);
+
+  if (!best?.url) return null;
+  if (!(await isPlayableStreamUrl(best.url))) return null;
+
+  return best.url;
+}
+
+async function resolveStreamUrl(videoId) {
+  const cached = streamUrlCache.get(videoId);
+  if (cached && cached.expiresAt > Date.now()) {
+    const stillValid = await isPlayableStreamUrl(cached.streamUrl);
+    if (stillValid) return cached.streamUrl;
+    streamUrlCache.delete(videoId);
+  }
+
+  const extracted = await extractStreamUrl(videoId);
+  if (!extracted) return null;
+
+  streamUrlCache.set(videoId, {
+    streamUrl: extracted,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+
+  if (streamUrlCache.size > 400) {
+    const now = Date.now();
+    for (const [key, value] of streamUrlCache.entries()) {
+      if (value.expiresAt < now) streamUrlCache.delete(key);
     }
   }
 
-  const invidiousInstances = await getInvidiousInstances();
-  for (const instance of invidiousInstances) {
-    try {
-      console.log(`[stream/${videoId}] Invidious: ${instance}`);
-      const res = await fetchWithTimeout(`${instance}/api/v1/videos/${videoId}`, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const candidates = [
-        ...(data?.adaptiveFormats || []),
-        ...(data?.formatStreams || []),
-      ]
-        .filter((s) => {
-          if (!isHttpUrl(s?.url)) return false;
-          const mime = s?.mime_type || s?.mimeType || s?.type || "";
-          return mime.includes("audio/");
-        })
-        .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0));
-
-      if (candidates[0]?.url) {
-        console.log(`[stream/${videoId}] Got URL from Invidious ${instance}`);
-        return candidates[0].url;
-      }
-    } catch {
-      // Continue with next instance.
-    }
-  }
-
-  console.error(`[stream/${videoId}] All sources exhausted`);
-  return null;
+  return extracted;
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "pulsebox-stream-backend", time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: "pulsebox-stream-backend",
+    extractor: "yt-dlp",
+    time: new Date().toISOString(),
+  });
 });
 
 app.get("/api/youtube/audio/:videoId", async (req, res) => {
@@ -248,15 +165,18 @@ app.get("/api/youtube/audio/:videoId", async (req, res) => {
   }
 
   try {
-    const url = await getAudioUrl(videoId);
-    if (!url) {
-      return res.status(404).json({ error: "No audio available" });
+    const streamUrl = await resolveStreamUrl(videoId);
+    if (!streamUrl) {
+      return res.status(404).json({ error: "No playable audio stream available" });
     }
 
-    return res.json({ streamUrl: url, url });
+    return res.json({ streamUrl, url: streamUrl });
   } catch (error) {
-    console.error(`[audio/${videoId}] Error:`, error?.message || "unknown error");
-    return res.status(500).json({ error: "Internal server error" });
+    console.error(
+      `[audio/${videoId}] yt-dlp extraction error:`,
+      error instanceof Error ? error.message : "unknown error"
+    );
+    return res.status(500).json({ error: "Extraction failed" });
   }
 });
 
@@ -267,18 +187,19 @@ app.get("/api/stream/:videoId", async (req, res) => {
   }
 
   try {
-    const audioUrl = await getAudioUrl(videoId);
-    if (!audioUrl) {
-      return res.status(404).json({ error: "No audio available" });
+    const streamUrl = await resolveStreamUrl(videoId);
+    if (!streamUrl) {
+      return res.status(404).json({ error: "No playable audio stream available" });
     }
 
     const sourceHeaders = { "User-Agent": "Mozilla/5.0" };
-    const rangeHeader = req.headers.range;
-    if (rangeHeader) sourceHeaders.Range = rangeHeader;
+    if (req.headers.range) {
+      sourceHeaders.Range = req.headers.range;
+    }
 
-    const sourceRes = await fetch(audioUrl, { headers: sourceHeaders });
+    const sourceRes = await fetch(streamUrl, { headers: sourceHeaders });
     if (!sourceRes.ok || !sourceRes.body) {
-      return res.status(502).json({ error: "Failed to fetch audio" });
+      return res.status(502).json({ error: "Failed to fetch audio source" });
     }
 
     const contentType = sourceRes.headers.get("Content-Type") || "audio/mpeg";
@@ -288,19 +209,18 @@ app.get("/api/stream/:videoId", async (req, res) => {
     res.status(sourceRes.status);
     res.setHeader("Content-Type", contentType);
     res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Cache-Control", "public, max-age=60");
 
     if (contentLength) res.setHeader("Content-Length", contentLength);
     if (contentRange) res.setHeader("Content-Range", contentRange);
 
-    const nodeStream = require("stream");
-    nodeStream.Readable.fromWeb(sourceRes.body).pipe(res);
+    Readable.fromWeb(sourceRes.body).pipe(res);
   } catch (error) {
     console.error(
-      `[stream/${videoId}] Error:`,
-      (error && error.message ? error.message : "unknown error").toString().slice(0, 120)
+      `[stream/${videoId}] stream proxy error:`,
+      error instanceof Error ? error.message : "unknown error"
     );
-    res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
