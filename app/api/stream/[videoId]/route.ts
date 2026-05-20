@@ -5,6 +5,7 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 const SOURCE_TIMEOUT_MS = 3500;
+const INVIDIOUS_DISCOVERY_TTL_MS = 60 * 60 * 1000;
 
 // Cache Innertube instance
 let innertubeInstance: Awaited<ReturnType<typeof Innertube.create>> | null = null;
@@ -31,11 +32,13 @@ const PIPED_INSTANCES = [
   "https://pipedapi.darkness.services",
 ];
 
-const INVIDIOUS_INSTANCES = [
-  "https://inv.nadeko.net",
-  "https://invidious.projectsegfau.lt",
-  "https://invidious.privacyredirect.com",
+type InvidiousInstanceRow = [
+  string,
+  { api?: boolean; uri?: string; monitor?: { uptime?: number } }
 ];
+
+let cachedInvidiousInstances: string[] = [];
+let invidiousCachedAt = 0;
 
 function isHttpUrl(value: unknown): value is string {
   return typeof value === "string" && /^https?:\/\//.test(value);
@@ -45,8 +48,52 @@ type AudioCandidate = {
   url?: string;
   mime_type?: string;
   mimeType?: string;
+  type?: string;
   bitrate?: number;
 };
+
+async function getInvidiousInstances(): Promise<string[]> {
+  if (
+    cachedInvidiousInstances.length > 0 &&
+    Date.now() - invidiousCachedAt < INVIDIOUS_DISCOVERY_TTL_MS
+  ) {
+    return cachedInvidiousInstances;
+  }
+
+  try {
+    const res = await fetch("https://api.invidious.io/instances.json", {
+      next: { revalidate: 3600 },
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (!res.ok) {
+      return cachedInvidiousInstances;
+    }
+
+    const data = (await res.json()) as InvidiousInstanceRow[];
+    const instances = data
+      .filter((row) => row[1]?.api === true && !!row[1]?.uri)
+      .sort((a, b) => (b[1]?.monitor?.uptime ?? 0) - (a[1]?.monitor?.uptime ?? 0))
+      .map((row) => row[1].uri as string)
+      .slice(0, 8);
+
+    if (instances.length > 0) {
+      cachedInvidiousInstances = instances;
+      invidiousCachedAt = Date.now();
+    }
+  } catch {
+    // Keep previous cache or fall back to static defaults below.
+  }
+
+  if (cachedInvidiousInstances.length > 0) {
+    return cachedInvidiousInstances;
+  }
+
+  return [
+    "https://inv.nadeko.net",
+    "https://invidious.projectsegfau.lt",
+    "https://invidious.privacyredirect.com",
+  ];
+}
 
 async function resolveInnertubeAudioUrl(
   yt: Awaited<ReturnType<typeof Innertube.create>>,
@@ -133,7 +180,8 @@ async function getAudioUrl(videoId: string): Promise<string | null> {
   }
 
   // Fallback: Invidious
-  for (const instance of INVIDIOUS_INSTANCES) {
+  const invidiousInstances = await getInvidiousInstances();
+  for (const instance of invidiousInstances) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
@@ -148,12 +196,13 @@ async function getAudioUrl(videoId: string): Promise<string | null> {
       if (!res.ok) continue;
       const data = (await res.json()) as {
         adaptiveFormats?: AudioCandidate[];
+        formatStreams?: AudioCandidate[];
       };
-      const candidates = (data.adaptiveFormats ?? [])
+      const candidates = [...(data.adaptiveFormats ?? []), ...(data.formatStreams ?? [])]
         .filter((s) => {
           if (!isHttpUrl(s.url)) return false;
-          const mime = s.mime_type ?? s.mimeType ?? "";
-          return mime.startsWith("audio/");
+          const mime = s.mime_type ?? s.mimeType ?? s.type ?? "";
+          return mime.includes("audio/");
         })
         .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
 
