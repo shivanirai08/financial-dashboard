@@ -447,7 +447,7 @@ export async function resolveMp3Link(
         );
         continue;
       }
-    } catch (error) {
+    } catch {
       // Provider fetch failed; try next
       continue;
     }

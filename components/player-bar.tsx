@@ -23,6 +23,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { usePlayerStore } from "@/store/player-store";
+import { audioEngine } from "@/lib/audio-engine";
 
 function formatTime(sec: number) {
   if (!sec || isNaN(sec)) return "0:00";
@@ -59,6 +60,8 @@ export function PlayerBar() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef<YT.Player | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Draggable video panel ─────────────────────────────────────────────────
   // Position is stored as { right, bottom } offsets from viewport edges
@@ -146,42 +149,177 @@ export function PlayerBar() {
       document.exitFullscreen?.();
     }
   }
-  const playerRef = useRef<YT.Player | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playbackToggleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackLoadingStartedAtRef = useRef<number | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
-  const warmedMp3IdsRef = useRef<Set<string>>(new Set());
-  const lastQueueWarmKeyRef = useRef("");
-  const playNextRef = useRef(playNext);
-  playNextRef.current = playNext;
-  // True while the tab is hidden — we block pause to keep audio going
-  const tabHiddenRef = useRef(false);
 
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [liked, setLiked] = useState(false);
   const [isPlaybackLoading, setIsPlaybackLoading] = useState(false);
+  const [isTrackLoading, setIsTrackLoading] = useState(false);
+  const [isIframeFallback, setIsIframeFallback] = useState(false);
+  const [useDownloadFlowPlayback, setUseDownloadFlowPlayback] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  const forceResumeIfNeeded = useCallback(() => {
-    const p = playerRef.current;
-    if (!p) return;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
 
+    const nav = navigator as Navigator & { standalone?: boolean };
+    const media = window.matchMedia("(display-mode: standalone)");
+    const isMobileUa = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent ?? "");
+
+    const updateMode = () => {
+      const isStandalonePwa = media.matches || nav.standalone === true;
+      setUseDownloadFlowPlayback(isStandalonePwa || isMobileUa);
+    };
+
+    updateMode();
+    media.addEventListener?.("change", updateMode);
+    return () => {
+      media.removeEventListener?.("change", updateMode);
+    };
+  }, []);
+
+  const clearPlaybackLoading = useCallback(() => {
+    const startedAt = playbackLoadingStartedAtRef.current;
+    const elapsed = startedAt ? Date.now() - startedAt : MIN_PLAYBACK_LOADING_MS;
+    const waitMs = Math.max(0, MIN_PLAYBACK_LOADING_MS - elapsed);
+
+    if (playbackToggleTimeoutRef.current) {
+      clearTimeout(playbackToggleTimeoutRef.current);
+      playbackToggleTimeoutRef.current = null;
+    }
+
+    playbackToggleTimeoutRef.current = setTimeout(() => {
+      setIsPlaybackLoading(false);
+      playbackLoadingStartedAtRef.current = null;
+      playbackToggleTimeoutRef.current = null;
+    }, waitMs);
+  }, []);
+
+  const ensureIframePlayer = useCallback(async (): Promise<YT.Player> => {
+    if (playerRef.current) return playerRef.current;
+
+    if (typeof window === "undefined") {
+      throw new Error("YouTube iframe is only available in browser");
+    }
+
+    if (!window.YT?.Player) {
+      await new Promise<void>((resolve) => {
+        const prev = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => {
+          prev?.();
+          resolve();
+        };
+
+        if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+          const tag = document.createElement("script");
+          tag.src = "https://www.youtube.com/iframe_api";
+          document.head.appendChild(tag);
+        }
+      });
+    }
+
+    if (!containerRef.current) {
+      throw new Error("Video container not ready");
+    }
+
+    playerRef.current = new window.YT.Player(containerRef.current, {
+      videoId: "",
+      playerVars: { autoplay: 1, controls: 1, rel: 0, modestbranding: 1, playsinline: 1 },
+      events: {
+        onStateChange: (event) => {
+          if (event.data === 1) {
+            setIsPlaying(true);
+            clearPlaybackLoading();
+            setIsTrackLoading(false);
+            if (!intervalRef.current) {
+              intervalRef.current = setInterval(() => {
+                const p = playerRef.current;
+                if (!p) return;
+                const cur = p.getCurrentTime?.() ?? 0;
+                const dur = p.getDuration?.() ?? 0;
+                setProgress(dur > 0 ? (cur / dur) * 100 : 0);
+                setDuration(dur);
+              }, 500);
+            }
+          } else if (event.data === 2) {
+            setIsPlaying(false);
+            clearPlaybackLoading();
+          } else if (event.data === 0) {
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
+            setProgress(0);
+            playNext();
+          }
+        },
+      },
+    });
+
+    return playerRef.current;
+  }, [setIsPlaying, clearPlaybackLoading, playNext]);
+
+  const fallbackToIframe = useCallback(async (videoId: string) => {
+    setIsIframeFallback(true);
+    void audioEngine.syncPlaybackState(false).catch(() => {
+      // Best effort pause of native engine before fallback.
+    });
+    const player = await ensureIframePlayer();
+    player.loadVideoById(videoId);
+    setTimeout(() => {
+      try {
+        player.playVideo();
+      } catch {
+        // player may still be warming up
+      }
+    }, 50);
+  }, [ensureIframePlayer]);
+
+  useEffect(() => {
+    if (!mounted) return;
+
+    audioEngine.init();
+    audioEngine.setCallbacks({
+      onPlayStateChange: (playing) => {
+        setIsPlaying(playing);
+        if (playing) {
+          clearPlaybackLoading();
+          setIsTrackLoading(false);
+        }
+      },
+      onTimeUpdate: (currentTime, totalDuration) => {
+        setDuration(Number.isFinite(totalDuration) ? totalDuration : 0);
+        setProgress(totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0);
+      },
+      onDuration: (totalDuration) => {
+        setDuration(Number.isFinite(totalDuration) ? totalDuration : 0);
+      },
+      onEnded: () => {
+        setProgress(0);
+        playNext();
+      },
+      onError: () => {
+        setIsTrackLoading(false);
+        clearPlaybackLoading();
+      },
+      onNext: () => playNext(),
+      onPrev: () => playPrev(),
+    });
+  }, [mounted, setIsPlaying, clearPlaybackLoading, playNext, playPrev]);
+
+  const forceResumeIfNeeded = useCallback(() => {
     const shouldPlay = usePlayerStore.getState().isPlaying;
     if (!shouldPlay) return;
 
-    const state = p.getPlayerState?.();
-    if (state === 2 || state === -1) {
-      try {
-        p.playVideo();
-      } catch {
-        // Browser media policies can block this; ignore and retry on next visibility/focus.
-      }
-    }
+    void audioEngine.syncPlaybackState(true).catch(() => {
+      // Browser media policies can block this; ignore and retry on next visibility/focus.
+    });
   }, []);
 
   const requestWakeLock = useCallback(async () => {
@@ -210,27 +348,8 @@ export function PlayerBar() {
     }
   }, []);
 
-  const clearPlaybackLoading = useCallback(() => {
-    const startedAt = playbackLoadingStartedAtRef.current;
-    const elapsed = startedAt ? Date.now() - startedAt : MIN_PLAYBACK_LOADING_MS;
-    const waitMs = Math.max(0, MIN_PLAYBACK_LOADING_MS - elapsed);
-
-    if (playbackToggleTimeoutRef.current) {
-      clearTimeout(playbackToggleTimeoutRef.current);
-      playbackToggleTimeoutRef.current = null;
-    }
-
-    playbackToggleTimeoutRef.current = setTimeout(() => {
-      setIsPlaybackLoading(false);
-      playbackLoadingStartedAtRef.current = null;
-      playbackToggleTimeoutRef.current = null;
-    }, waitMs);
-  }, []);
-
-  // ── Block pause when tab is hidden / screen locked ────────────────────────
   useEffect(() => {
     function handleVisibility() {
-      tabHiddenRef.current = document.hidden;
       if (!document.hidden) {
         forceResumeIfNeeded();
         void requestWakeLock();
@@ -268,6 +387,10 @@ export function PlayerBar() {
   useEffect(() => {
     return () => {
       void releaseWakeLock();
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
       if (playbackToggleTimeoutRef.current) {
         clearTimeout(playbackToggleTimeoutRef.current);
         playbackToggleTimeoutRef.current = null;
@@ -275,138 +398,96 @@ export function PlayerBar() {
     };
   }, [releaseWakeLock]);
 
-  // ── YouTube IFrame API bootstrap ──────────────────────────────────────────
-  const initPlayer = useCallback(() => {
-    if (!containerRef.current || playerRef.current) return;
+  // YouTube iframe playback has been intentionally disabled.
 
-    playerRef.current = new window.YT.Player(containerRef.current, {
-      videoId: "",
-      playerVars: { autoplay: 1, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
-      events: {
-        onStateChange(event) {
-          if (event.data === 1) {
-            clearPlaybackLoading();
-            setIsPlaying(true);
-            if (!intervalRef.current) {
-              intervalRef.current = setInterval(() => {
-                const p = playerRef.current;
-                if (!p) return;
-                const cur = p.getCurrentTime?.() ?? 0;
-                const dur = p.getDuration?.() ?? 0;
-                setProgress(dur > 0 ? (cur / dur) * 100 : 0);
-                setDuration(dur);
-              }, 500);
-            }
-          } else if (event.data === 2) {
-            clearPlaybackLoading();
-            // Only reflect PAUSED state when the tab is actually visible
-            // (hidden tab browsers silently pause YouTube — we ignore it)
-            if (!tabHiddenRef.current) {
-              setIsPlaying(false);
-            } else {
-              // Tab is hidden — force resume immediately
-              try { playerRef.current?.playVideo(); } catch { /* ignore */ }
-            }
-          } else if (event.data === 0) {
-            if (intervalRef.current) {
-              clearInterval(intervalRef.current);
-              intervalRef.current = null;
-            }
-            setProgress(0);
-            playNextRef.current();
-          }
-        },
-      },
-    });
-  }, [setIsPlaying, clearPlaybackLoading]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    if (window.YT?.Player) {
-      initPlayer();
-    } else {
-      window.onYouTubeIframeAPIReady = initPlayer;
-      if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
-        const tag = document.createElement("script");
-        tag.src = "https://www.youtube.com/iframe_api";
-        document.head.appendChild(tag);
-      }
-    }
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [initPlayer]);
-
-  useEffect(() => {
-    if (!mounted || typeof window === "undefined") return;
-    if (!("mediaSession" in navigator)) return;
-
-    const mediaSession = navigator.mediaSession;
-
-    if (currentSong) {
-      mediaSession.metadata = new MediaMetadata({
-        title: currentSong.title,
-        artist: currentSong.artist,
-        album: "Pulsebox",
-        artwork: currentSong.thumbnail
-          ? [
-              { src: currentSong.thumbnail, sizes: "96x96", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "192x192", type: "image/jpeg" },
-              { src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" },
-            ]
-          : [],
-      });
-      mediaSession.playbackState = isPlaying ? "playing" : "paused";
-    } else {
-      mediaSession.metadata = null;
-      mediaSession.playbackState = "none";
-    }
-
-    const safeSetActionHandler = (
-      action: MediaSessionAction,
-      handler: MediaSessionActionHandler | null
-    ) => {
-      try {
-        mediaSession.setActionHandler(action, handler);
-      } catch {
-        // Some browsers support MediaSession without all action handlers.
-      }
-    };
-
-    safeSetActionHandler("play", () => setIsPlaying(true));
-    safeSetActionHandler("pause", () => setIsPlaying(false));
-    safeSetActionHandler("previoustrack", () => playPrev());
-    safeSetActionHandler("nexttrack", () => playNext());
-
-    return () => {
-      safeSetActionHandler("play", null);
-      safeSetActionHandler("pause", null);
-      safeSetActionHandler("previoustrack", null);
-      safeSetActionHandler("nexttrack", null);
-    };
-  }, [mounted, currentSong, isPlaying, setIsPlaying, playPrev, playNext]);
-
-  // ── Load new video when currentSong changes ───────────────────────────────
   useEffect(() => {
     if (!currentSong?.youtube_video_id) return;
+
     setProgress(0);
     setDuration(0);
     setLiked(currentSong.liked ?? false);
-    if (playerRef.current) {
-      playerRef.current.loadVideoById(currentSong.youtube_video_id);
+    setIsTrackLoading(true);
+    setIsPlaybackLoading(true);
+    playbackLoadingStartedAtRef.current = Date.now();
+
+    if (!useDownloadFlowPlayback) {
+      void fallbackToIframe(currentSong.youtube_video_id).catch(() => {
+        setIsTrackLoading(false);
+        clearPlaybackLoading();
+        setIsPlaying(false);
+      });
+      return;
     }
-  }, [currentSong?.youtube_video_id, currentSong?.id]);
+
+    setIsIframeFallback(false);
+
+    void audioEngine
+      .playSong(currentSong)
+      .then(() => {
+        setIsIframeFallback(false);
+        setIsTrackLoading(false);
+        clearPlaybackLoading();
+      })
+      .catch(async () => {
+        if (!currentSong.youtube_video_id) {
+          setIsTrackLoading(false);
+          clearPlaybackLoading();
+          setIsPlaying(false);
+          return;
+        }
+
+        try {
+          await fallbackToIframe(currentSong.youtube_video_id);
+        } catch {
+          setIsTrackLoading(false);
+          clearPlaybackLoading();
+          setIsPlaying(false);
+        }
+      });
+  }, [
+    currentSong?.youtube_video_id,
+    currentSong?.id,
+    currentSong,
+    clearPlaybackLoading,
+    setIsPlaying,
+    fallbackToIframe,
+    useDownloadFlowPlayback,
+  ]);
 
   useEffect(() => {
     setLiked(currentSong?.liked ?? false);
   }, [currentSong?.liked]);
 
   useEffect(() => {
-    if (!playerRef.current || !currentSong) return;
-    // Never forcibly pause while the tab is hidden
-    if (!isPlaying && tabHiddenRef.current) return;
+    if (!useDownloadFlowPlayback) return;
+    if (!currentSong) return;
+
+    const nextSongIndex = queue[currentQueuePos + 1];
+    const nextSong = nextSongIndex != null ? songs[nextSongIndex] : null;
+    audioEngine.setNextTrack(nextSong ?? null);
+  }, [currentSong, queue, currentQueuePos, songs, useDownloadFlowPlayback]);
+
+  useEffect(() => {
+    if (!useDownloadFlowPlayback) return;
+    const upcomingSongs = queue
+      .slice(currentQueuePos + 1)
+      .map((songIndex) => songs[songIndex])
+      .filter((song): song is NonNullable<typeof song> => Boolean(song));
+
+    void audioEngine.preloadQueueTracks(upcomingSongs);
+  }, [queue, currentQueuePos, songs, useDownloadFlowPlayback]);
+
+  useEffect(() => {
+    if (!useDownloadFlowPlayback) return;
+    if (!currentSong) return;
+    if (isIframeFallback) return;
+    void audioEngine.syncPlaybackState(isPlaying).catch(() => {
+      // Best effort only.
+    });
+  }, [isPlaying, currentSong, isIframeFallback, useDownloadFlowPlayback]);
+
+  useEffect(() => {
+    if (!currentSong || !isIframeFallback || !playerRef.current) return;
     try {
       if (isPlaying) {
         playerRef.current.playVideo();
@@ -414,47 +495,20 @@ export function PlayerBar() {
         playerRef.current.pauseVideo();
       }
     } catch {
-      // player may not be ready yet
+      // Ignore transient iframe state errors.
     }
-  }, [isPlaying, currentSong]);
-
-  // Temporary test hook: keep MP3 cache endpoints active even while playback uses YouTube iframe.
-  useEffect(() => {
-    const videoId = currentSong?.youtube_video_id;
-    if (!videoId) return;
-
-    if (!warmedMp3IdsRef.current.has(videoId)) {
-      warmedMp3IdsRef.current.add(videoId);
-      void fetch(`/api/youtube/audio-mp3/${videoId}?flow=cache`).catch(() => {
-        // Best effort prewarm only.
-      });
-    }
-
-    const upcomingVideoIds = queue
-      .slice(currentQueuePos + 1)
-      .map((songIndex) => songs[songIndex]?.youtube_video_id)
-      .filter((id): id is string => Boolean(id))
-      .slice(0, 2);
-
-    const queueWarmKey = upcomingVideoIds.join(",");
-    if (!queueWarmKey || queueWarmKey === lastQueueWarmKeyRef.current) return;
-    lastQueueWarmKeyRef.current = queueWarmKey;
-
-    void fetch("/api/youtube/audio-mp3/queue", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ videoIds: upcomingVideoIds }),
-    }).catch(() => {
-      // Best effort prewarm only.
-    });
-  }, [currentSong?.youtube_video_id, queue, currentQueuePos, songs]);
+  }, [isPlaying, currentSong, isIframeFallback]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   function handleProgressClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (!playerRef.current || duration === 0) return;
+    if (duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    playerRef.current.seekTo(pct * duration, true);
+    if (isIframeFallback && playerRef.current) {
+      playerRef.current.seekTo(pct * duration, true);
+    } else {
+      audioEngine.seekTo(pct * duration);
+    }
     setProgress(pct * 100);
   }
 
@@ -591,10 +645,10 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayPauseToggle}
-              disabled={isPlaybackLoading}
+              disabled={isPlaybackLoading || isTrackLoading}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition-transform active:scale-95"
             >
-              {isPlaybackLoading ? (
+              {isPlaybackLoading || isTrackLoading ? (
                 <Loader2 size={24} className="animate-spin" />
               ) : isPlaying ? (
                 <Pause size={26} />
@@ -646,7 +700,7 @@ export function PlayerBar() {
         </div>
       </div>
 
-      {/* ── Floating video panel — draggable ─────────────────────────── */}
+      {/* YouTube iframe is available only as a fallback if MP3 methods fail. */}
       <div
         ref={videoPanelRef}
         className="fixed z-50 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-2xl"
@@ -656,13 +710,11 @@ export function PlayerBar() {
           right: isFullscreen ? 0 : Math.max(4, panelPos.right),
           opacity: showVideo && currentSong ? 1 : 0,
           pointerEvents: showVideo && currentSong ? "auto" : "none",
-          // No CSS transition on position — drag must be instant
           transition: "opacity 0.2s, bottom 0.2s",
           userSelect: "none",
           touchAction: "none",
         }}
       >
-        {/* Header — grab here to drag */}
         <div
           className="flex cursor-grab items-center gap-2 border-b border-white/10 bg-black/80 px-3 py-2 backdrop-blur-sm active:cursor-grabbing"
           onPointerDown={handleDragStart}
@@ -673,7 +725,6 @@ export function PlayerBar() {
           <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-300">
             {currentSong?.title ?? ""}
           </p>
-          {/* Cycle size */}
           <button
             onClick={() => setVideoSize((s) => VIDEO_SIZE_NEXT[s])}
             title={`Size: ${videoSize.toUpperCase()} — click to change`}
@@ -681,7 +732,6 @@ export function PlayerBar() {
           >
             {videoSize === "lg" ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
           </button>
-          {/* Fullscreen */}
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
@@ -689,7 +739,6 @@ export function PlayerBar() {
           >
             {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-          {/* Close */}
           <button
             onClick={toggleVideo}
             title="Hide video"
@@ -698,7 +747,13 @@ export function PlayerBar() {
             <X size={13} />
           </button>
         </div>
-        <div ref={containerRef} className="aspect-video w-full" />
+        {isIframeFallback ? (
+          <div ref={containerRef} className="aspect-video w-full" />
+        ) : (
+          <div className="flex aspect-video w-full items-center justify-center px-4 text-center text-xs text-slate-400">
+            MP3 cache/direct methods are active. YouTube iframe will be used automatically as fallback.
+          </div>
+        )}
       </div>
 
       {/* ── Queue panel — slides up above the player bar ─────────────── */}
@@ -846,11 +901,11 @@ export function PlayerBar() {
             </button>
             <button
               onClick={handlePlayPauseToggle}
-              disabled={isPlaybackLoading}
+              disabled={isPlaybackLoading || isTrackLoading}
               title={isPlaying ? "Pause" : "Play"}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 sm:h-10 sm:w-10"
             >
-              {isPlaybackLoading ? (
+              {isPlaybackLoading || isTrackLoading ? (
                 <Loader2 size={16} className="animate-spin" />
               ) : isPlaying ? (
                 <Pause size={17} />

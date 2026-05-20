@@ -80,6 +80,10 @@ class AudioEngine {
       this.upcomingTracks = tracksToPreload;
 
       const queueIds = tracksToPreload.map((track) => track.videoId);
+      if (queueIds.length === 0) {
+        return;
+      }
+
       const queueEndpoint = STREAM_BACKEND_BASE
         ? `${STREAM_BACKEND_BASE}/api/youtube/audio-mp3/queue`
         : "/api/youtube/audio-mp3/queue";
@@ -421,8 +425,14 @@ class AudioEngine {
   }
 
   private shouldUseDownloadFlow(): boolean {
-    // Temporary testing override: enable cache/download flow on desktop as well.
-    return true;
+    if (typeof window === "undefined") return false;
+
+    const nav = navigator as Navigator & { standalone?: boolean };
+    const isStandalonePwa =
+      window.matchMedia?.("(display-mode: standalone)")?.matches || nav.standalone === true;
+    const isMobileUa = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent ?? "");
+
+    return isStandalonePwa || isMobileUa;
   }
 
   private async isPlayableStreamUrl(streamUrl: string): Promise<boolean> {
