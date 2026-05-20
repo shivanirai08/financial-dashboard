@@ -59,6 +59,7 @@ export function PlayerBar() {
     toggleVideo,
     toggleQueue,
     updateLike,
+    engineAdvancedToNext,
   } = usePlayerStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -312,8 +313,16 @@ export function PlayerBar() {
       },
       onNext: () => playNext(),
       onPrev: () => playPrev(),
+      // Engine auto-advanced directly inside the ended handler (trusted context).
+      // Just update React UI state — do NOT call playSong again.
+      onAutoAdvance: () => {
+        setProgress(0);
+        setDuration(0);
+        setIsIframeFallback(false);
+        engineAdvancedToNext();
+      },
     });
-  }, [mounted, setIsPlaying, clearPlaybackLoading, playNext, playPrev]);
+  }, [mounted, setIsPlaying, clearPlaybackLoading, playNext, playPrev, engineAdvancedToNext]);
 
   const forceResumeIfNeeded = useCallback(() => {
     const shouldPlay = usePlayerStore.getState().isPlaying;

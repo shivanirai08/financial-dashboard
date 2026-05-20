@@ -16,6 +16,10 @@ type EngineCallbacks = {
   onError?: (error: MediaError | null) => void;
   onNext?: () => void;
   onPrev?: () => void;
+  // Called when the engine auto-advances to the next track internally (within the
+  // `ended` event handler), bypassing the React useEffect cycle so that
+  // audio.play() remains inside the trusted media-event context on Android Chrome.
+  onAutoAdvance?: (song: DbSong) => void;
 };
 
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -40,6 +44,11 @@ class AudioEngine {
   private playGeneration = 0;
   // Throttle setPositionState calls in timeupdate (~every 1 s is enough for the notification)
   private positionUpdateTick = 0;
+  // Full DbSong for the next track so direct transitions can notify React
+  private nextSong: DbSong | null = null;
+  // Set to a videoId when the engine directly transitions within the ended handler;
+  // playSong() checks this and skips to avoid a duplicate play.
+  private directTransitionVideoId: string | null = null;
 
   init(): void {
     this.ensureAudio();
@@ -52,10 +61,12 @@ class AudioEngine {
   setNextTrack(song: DbSong | null): void {
     if (!song?.youtube_video_id) {
       this.nextTrack = null;
+      this.nextSong = null;
       this.nextStreamUrl = null;
       return;
     }
 
+    this.nextSong = song;
     this.nextTrack = this.toEngineTrack(song);
     this.preResolveAndWarmNext().catch(() => {
       // Best effort only.
@@ -141,6 +152,13 @@ class AudioEngine {
   async playSong(song: DbSong): Promise<void> {
     if (!song.youtube_video_id) {
       throw new Error("Song has no YouTube video id");
+    }
+
+    // The engine already started playing this track via a direct transition inside
+    // the ended event handler.  Skip the duplicate play so we don't restart it.
+    if (song.youtube_video_id === this.directTransitionVideoId) {
+      this.directTransitionVideoId = null;
+      return;
     }
 
     // Bump generation so any in-flight call for a previous song aborts itself
@@ -263,6 +281,9 @@ class AudioEngine {
     if (!this.audio) return;
 
     this.audio.addEventListener("play", () => {
+      // Clear the direct-transition guard once the audio element confirms playback
+      this.directTransitionVideoId = null;
+
       this.callbacks.onPlayStateChange?.(true);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "playing";
@@ -318,6 +339,56 @@ class AudioEngine {
     });
 
     this.audio.addEventListener("ended", () => {
+      // ── Direct transition (critical for mobile autoplay) ──────────────────
+      // audio.play() for the next track MUST be called synchronously within
+      // this trusted media-event handler. Going through React's async state
+      // update cycle breaks the trusted context on Android Chrome, causing
+      // audio.play() to be blocked by autoplay policy from the 3rd song onward
+      // (and MediaSession notifications to disappear between tracks).
+      if (this.nextSong && this.nextTrack && this.audio) {
+        const nextUrl = this.getResolvedUrl(this.nextTrack.videoId);
+        if (nextUrl) {
+          const gen = ++this.playGeneration;
+          this.positionUpdateTick = 0;
+          const track = this.nextTrack;
+          const song = this.nextSong;
+
+          this.currentTrack = track;
+          // Mark so playSong() skips this videoId when React's useEffect fires
+          this.directTransitionVideoId = track.videoId;
+
+          // Snapshot then clear next-track state before the async continuation
+          this.nextTrack = null;
+          this.nextSong = null;
+          this.nextStreamUrl = null;
+
+          // Set new src and update MediaSession BEFORE play() so the lock-screen
+          // notification refreshes immediately with no visible gap.
+          this.audio.src = nextUrl;
+          this.updateMediaSession(track);
+
+          // play() called synchronously — still within the ended event handler
+          const playPromise = this.audio.play();
+
+          // Notify React to advance its UI state (currentSong, queue pos, etc.)
+          this.callbacks.onAutoAdvance?.(song);
+
+          // Pre-resolve the track after next in the background
+          void this.preResolveAndWarmNext();
+
+          if (playPromise) {
+            playPromise.catch(() => {
+              if (gen !== this.playGeneration) return;
+              // Direct play failed — clear the guard and let error handling run
+              this.directTransitionVideoId = null;
+              this.callbacks.onError?.(null);
+            });
+          }
+          return;
+        }
+      }
+
+      // Fallback: no cached URL yet — let React handle it via onEnded
       this.callbacks.onEnded?.();
     });
 
@@ -437,9 +508,14 @@ class AudioEngine {
       if (document.hidden) return;
       if (!this.currentTrack) return;
 
-      // Re-apply MediaSession when the page becomes visible again (e.g. user
-      // returns from lock screen or app switcher). iOS/Android often drop the
-      // MediaSession metadata when the page was suspended.
+      // Android Chrome can drop MediaSession action handlers when the page has
+      // been suspended (e.g. screen locked for a long time).  Re-registering
+      // them on every resume is idempotent and keeps the lock-screen controls
+      // functional for every track, not just the first one.
+      this.mediaSessionInitialized = false;
+      this.initMediaSessionOnce();
+
+      // Re-apply metadata so the lock-screen notification is always current.
       this.updateMediaSession(this.currentTrack);
 
       if (this.audio && !this.audio.paused) {

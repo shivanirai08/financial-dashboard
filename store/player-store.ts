@@ -29,6 +29,9 @@ type PlayerStore = {
   updateSongVideoId: (songId: string, videoId: string, url: string | null, thumbnail: string | null) => void;
   addSong: (song: DbSong) => void;
   removeSong: (songId: string) => void;
+  // Called by the audio engine after it auto-advances within the ended handler.
+  // Advances queue state without setting isLoadingTrack (engine is already playing).
+  engineAdvancedToNext: () => void;
 };
 
 function makeDefaultQueue(count: number) {
@@ -95,6 +98,30 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
     }
 
     set({ currentQueuePos: next, currentSong: songs[queue[next]] ?? null, isPlaying: true, isLoadingTrack: true });
+  },
+
+  engineAdvancedToNext() {
+    // Same logic as playNext() but does NOT set isLoadingTrack: true because the
+    // engine already started playback synchronously inside the ended handler.
+    const { queue, currentQueuePos, repeatMode, songs } = get();
+    if (queue.length === 0) return;
+
+    if (repeatMode === "one") {
+      set((s) => ({ currentSong: s.currentSong ? { ...s.currentSong } : null, isPlaying: true, isLoadingTrack: false }));
+      return;
+    }
+
+    const next = currentQueuePos + 1;
+    if (next >= queue.length) {
+      if (repeatMode === "all") {
+        set({ currentQueuePos: 0, currentSong: songs[queue[0]] ?? null, isPlaying: true, isLoadingTrack: false });
+      } else {
+        set({ isPlaying: false });
+      }
+      return;
+    }
+
+    set({ currentQueuePos: next, currentSong: songs[queue[next]] ?? null, isPlaying: true, isLoadingTrack: false });
   },
 
   playPrev() {
