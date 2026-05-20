@@ -1,26 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import YTDlpWrap from "yt-dlp-wrap";
+import YTDlpWrapModule from "yt-dlp-wrap";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
-
-type ExtractedFormat = {
-  acodec?: string;
-  vcodec?: string;
-  ext?: string;
-  abr?: number;
-  tbr?: number;
-  url?: string;
-};
-
-type ExtractedInfo = {
-  formats?: ExtractedFormat[];
-};
 
 const REQUEST_TIMEOUT_MS = 5000;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const YTDLP_BIN_PATH = process.env.YTDLP_PATH || "/tmp/yt-dlp";
 
+const YTDlpWrap =
+  (YTDlpWrapModule as unknown as { default?: typeof YTDlpWrapModule }).default ??
+  YTDlpWrapModule;
 const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
 let ytDlpReadyPromise: Promise<void> | null = null;
 
@@ -78,53 +68,28 @@ async function isPlayableStreamUrl(streamUrl: string): Promise<boolean> {
   }
 }
 
-function pickBestAudioFormat(formats: ExtractedFormat[]): ExtractedFormat | null {
-  const audioOnly = formats.filter((format) => {
-    if (!format.url) return false;
-    if (!format.acodec || format.acodec === "none") return false;
-    if (format.vcodec && format.vcodec !== "none") return false;
-    return true;
-  });
-
-  const extRank: Record<string, number> = {
-    m4a: 3,
-    mp4: 3,
-    webm: 2,
-    opus: 2,
-    mp3: 1,
-  };
-
-  audioOnly.sort((a, b) => {
-    const aExt = extRank[(a.ext || "").toLowerCase()] || 0;
-    const bExt = extRank[(b.ext || "").toLowerCase()] || 0;
-    if (aExt !== bExt) return bExt - aExt;
-    return (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0);
-  });
-
-  return audioOnly[0] ?? null;
-}
-
 async function extractStreamUrl(videoId: string): Promise<string | null> {
   await ensureYtDlpReady();
 
   const output = await ytDlpWrap.execPromise([
     `https://www.youtube.com/watch?v=${videoId}`,
-    "-J",
+    "-g",
     "--no-playlist",
     "--no-warnings",
-    "--skip-download",
     "-f",
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
   ]);
 
-  const parsed = JSON.parse(output) as ExtractedInfo;
-  const best = pickBestAudioFormat(parsed.formats ?? []);
-  if (!best?.url) return null;
+  const streamUrl = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!streamUrl) return null;
 
-  const valid = await isPlayableStreamUrl(best.url);
+  const valid = await isPlayableStreamUrl(streamUrl);
   if (!valid) return null;
 
-  return best.url;
+  return streamUrl;
 }
 
 export async function GET(

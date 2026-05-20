@@ -4,10 +4,12 @@ services:
     runtime: node
     plan: free
     rootDir: backend
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: npm install && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp && chmod a+rx yt-dlp
+    startCommand: ./yt-dlp -U || true && npm start
     envVars:
       - key: NODE_VERSION
         value: 20
       - key: CORS_ORIGIN
         value: "*"
+      - key: YTDLP_PATH
+        value: ./yt-dlp

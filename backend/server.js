@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import cors from "cors";
 import express from "express";
-import YTDlpWrap from "yt-dlp-wrap";
+import YTDlpWrapModule from "yt-dlp-wrap";
 
 const app = express();
 
@@ -11,6 +11,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.SOURCE_TIMEOUT_MS || 5000);
 const CACHE_TTL_MS = Number(process.env.STREAM_URL_CACHE_TTL_MS || 60 * 60 * 1000);
 const YTDLP_BIN_PATH = process.env.YTDLP_PATH || "/tmp/yt-dlp";
 
+const YTDlpWrap = YTDlpWrapModule?.default ?? YTDlpWrapModule;
 const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
 let ytDlpReadyPromise = null;
 
@@ -75,52 +76,26 @@ async function isPlayableStreamUrl(streamUrl) {
   }
 }
 
-function pickBestAudioFormat(formats) {
-  const audioOnly = (formats || []).filter((format) => {
-    if (!format?.url) return false;
-    if (!format?.acodec || format.acodec === "none") return false;
-    if (format?.vcodec && format.vcodec !== "none") return false;
-    return true;
-  });
-
-  const extRank = {
-    m4a: 3,
-    mp4: 3,
-    webm: 2,
-    opus: 2,
-    mp3: 1,
-  };
-
-  audioOnly.sort((a, b) => {
-    const aExt = extRank[(a.ext || "").toLowerCase()] || 0;
-    const bExt = extRank[(b.ext || "").toLowerCase()] || 0;
-    if (aExt !== bExt) return bExt - aExt;
-    return (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0);
-  });
-
-  return audioOnly[0] || null;
-}
-
 async function extractStreamUrl(videoId) {
   await ensureYtDlpReady();
 
   const output = await ytDlpWrap.execPromise([
     `https://www.youtube.com/watch?v=${videoId}`,
-    "-J",
+    "-g",
     "--no-playlist",
     "--no-warnings",
-    "--skip-download",
     "-f",
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
   ]);
+  const streamUrl = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
 
-  const parsed = JSON.parse(output);
-  const best = pickBestAudioFormat(parsed?.formats);
+  if (!streamUrl) return null;
+  if (!(await isPlayableStreamUrl(streamUrl))) return null;
 
-  if (!best?.url) return null;
-  if (!(await isPlayableStreamUrl(best.url))) return null;
-
-  return best.url;
+  return streamUrl;
 }
 
 async function resolveStreamUrl(videoId) {

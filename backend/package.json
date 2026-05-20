@@ -9,12 +9,11 @@
     "dev": "node --watch server.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "yt-dlp-wrap": "^2.3.12",
-    "youtubei.js": "^17.0.1"
+    "yt-dlp-wrap": "^2.3.12"
   }
 }

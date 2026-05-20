@@ -285,11 +285,10 @@ class AudioEngine {
     const primaryEndpoint = STREAM_BACKEND_BASE
       ? `${STREAM_BACKEND_BASE}/api/youtube/audio/${videoId}`
       : `/api/youtube/audio/${videoId}`;
-    const localEndpoint = `/api/youtube/audio/${videoId}`;
 
     let response = await fetch(primaryEndpoint);
-    if (!response.ok && primaryEndpoint !== localEndpoint) {
-      response = await fetch(localEndpoint);
+    if (!response.ok && !STREAM_BACKEND_BASE) {
+      response = await fetch(`/api/youtube/audio/${videoId}`);
     }
 
     if (!response.ok) {
