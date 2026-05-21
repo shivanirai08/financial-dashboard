@@ -26,6 +26,9 @@ type EngineCallbacks = {
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 const QUEUE_PRELOAD_BATCH_SIZE = 3; // Keep enough tracks ready for background transitions
 const URL_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // Refresh URLs every 30 minutes
+const TRANSITION_ANOMALY_WINDOW_MS = 1_500;
+const MAX_TRANSITION_RESUME_ATTEMPTS = 2;
+const TRANSITION_RESUME_DELAYS_MS = [150, 600];
 
 class AudioEngine {
   private audio: HTMLAudioElement | null = null;
@@ -56,6 +59,11 @@ class AudioEngine {
   private transitionCount = 0;
   private currentPlaybackOrdinal = 0;
   private lastMediaSessionPlaybackState: MediaSessionPlaybackState | "unsupported" = "unsupported";
+  private expectedToBePlaying = false;
+  private userPauseRequested = false;
+  private lastTransitionStartedAt: number | null = null;
+  private transitionRecoveryAttempts = 0;
+  private transitionRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   init(): void {
     this.ensureAudio();
@@ -235,10 +243,14 @@ class AudioEngine {
     const audio = this.ensureAudio();
 
     if (shouldPlay && audio.paused) {
+      this.expectedToBePlaying = true;
+      this.userPauseRequested = false;
       await audio.play();
     }
 
     if (!shouldPlay && !audio.paused) {
+      this.expectedToBePlaying = false;
+      this.userPauseRequested = true;
       audio.pause();
     }
   }
@@ -329,16 +341,27 @@ class AudioEngine {
           this.updateMediaSession(this.currentTrack);
         }
       }
+      this.expectedToBePlaying = true;
+      this.userPauseRequested = false;
       this.debugAudioState("event:play");
     });
 
     audio.addEventListener("pause", () => {
       if (!isActiveAudio()) return;
+
+      const shouldRecover = this.shouldAttemptTransitionRecovery();
+      if (shouldRecover) {
+        this.debugAudioState("transition:unexpected-pause");
+        this.scheduleTransitionRecovery("pause-event");
+        return;
+      }
+
       this.callbacks.onPlayStateChange?.(false);
       if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
         navigator.mediaSession.playbackState = "paused";
         this.lastMediaSessionPlaybackState = navigator.mediaSession.playbackState;
       }
+      this.expectedToBePlaying = false;
       this.debugAudioState("event:pause");
     });
 
@@ -404,6 +427,11 @@ class AudioEngine {
 
           this.currentTrack = track;
           this.currentPlaybackOrdinal = this.transitionCount + 1;
+          this.lastTransitionStartedAt = Date.now();
+          this.transitionRecoveryAttempts = 0;
+          this.clearTransitionRecoveryTimer();
+          this.expectedToBePlaying = true;
+          this.userPauseRequested = false;
           // Mark so playSong() skips this videoId when React's useEffect fires
           this.directTransitionVideoId = track.videoId;
 
@@ -447,14 +475,17 @@ class AudioEngine {
           if (playPromise) {
             playPromise
               .then(() => {
+                this.expectedToBePlaying = true;
                 this.debugLog("transition:play-success", {
                   videoId: track.videoId,
                   transitionCount: this.transitionCount,
                   playbackOrdinal: this.currentPlaybackOrdinal,
                   trackPhase: this.describeTrackPhase(this.currentPlaybackOrdinal),
                 });
+                this.scheduleTransitionRecovery("post-transition-watchdog");
               })
               .catch((error) => {
+                this.expectedToBePlaying = false;
                 this.debugLog("transition:play-failed", {
                   videoId: track.videoId,
                   transitionCount: this.transitionCount,
@@ -721,11 +752,12 @@ class AudioEngine {
       if (
         this.currentTrack &&
         this.audio.paused &&
-        this.audio.currentTime > 0 &&
+        this.expectedToBePlaying &&
         !this.audio.ended &&
         sessionState !== "paused"
       ) {
         this.debugAudioState("media-session:silent-pause-suspected");
+        this.scheduleTransitionRecovery("heartbeat");
       }
     }, 5_000);
   }
@@ -803,6 +835,73 @@ class AudioEngine {
     } catch {
       // Best effort only.
     }
+  }
+
+  private shouldAttemptTransitionRecovery(): boolean {
+    if (!this.audio || !this.expectedToBePlaying) return false;
+    if (this.userPauseRequested) return false;
+    if (this.audio.ended) return false;
+    if (this.audio.error) return false;
+    if (this.audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return false;
+    if (this.lastTransitionStartedAt == null) return false;
+    if (Date.now() - this.lastTransitionStartedAt > TRANSITION_ANOMALY_WINDOW_MS) return false;
+    if (this.transitionRecoveryAttempts >= MAX_TRANSITION_RESUME_ATTEMPTS) return false;
+    return true;
+  }
+
+  private scheduleTransitionRecovery(reason: string): void {
+    if (!this.shouldAttemptTransitionRecovery()) return;
+    if (this.transitionRecoveryTimer) return;
+
+    const delay =
+      TRANSITION_RESUME_DELAYS_MS[
+        Math.min(this.transitionRecoveryAttempts, TRANSITION_RESUME_DELAYS_MS.length - 1)
+      ] ?? 250;
+
+    this.debugLog("transition:resume-attempt", {
+      reason,
+      attempt: this.transitionRecoveryAttempts + 1,
+      delayMs: delay,
+    });
+
+    this.transitionRecoveryTimer = setTimeout(() => {
+      this.transitionRecoveryTimer = null;
+      void this.attemptTransitionRecovery(reason);
+    }, delay);
+  }
+
+  private async attemptTransitionRecovery(reason: string): Promise<void> {
+    if (!this.audio) return;
+    if (!this.shouldAttemptTransitionRecovery()) return;
+
+    this.transitionRecoveryAttempts += 1;
+
+    try {
+      await this.audio.play();
+      this.expectedToBePlaying = true;
+      this.userPauseRequested = false;
+      this.debugLog("transition:resume-success", {
+        reason,
+        attempt: this.transitionRecoveryAttempts,
+      });
+    } catch (error) {
+      this.debugLog("transition:resume-failed", {
+        reason,
+        attempt: this.transitionRecoveryAttempts,
+        error: this.describeError(error),
+      });
+      this.scheduleTransitionRecovery("retry-after-failure");
+      if (this.transitionRecoveryAttempts >= MAX_TRANSITION_RESUME_ATTEMPTS) {
+        this.expectedToBePlaying = false;
+        this.callbacks.onPlayStateChange?.(false);
+      }
+    }
+  }
+
+  private clearTransitionRecoveryTimer(): void {
+    if (!this.transitionRecoveryTimer) return;
+    clearTimeout(this.transitionRecoveryTimer);
+    this.transitionRecoveryTimer = null;
   }
 
   private async resolveStreamUrl(
