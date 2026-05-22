@@ -2,8 +2,30 @@ import type { ExpoConfig } from "expo/config";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 
-// Load .env from reactnative/ directory so it works both locally and in EAS cloud builds.
+// Load .env for local dev (won't exist in EAS cloud — fallbacks below cover that case).
 loadEnv({ path: path.resolve(__dirname, ".env") });
+loadEnv({ path: path.resolve(__dirname, "../.env") });
+
+// Fallbacks are the same values from ../.env so EAS cloud builds work without secrets.
+const supabaseUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ??
+  "https://wvsogmcujwhtsvxwfato.supabase.co";
+
+const supabaseAnonKey =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind2c29nbWN1andodHN2eHdmYXRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkwNDAzNjcsImV4cCI6MjA5NDYxNjM2N30.J99K_lEYOTQD-50zHVOhW1EFN5bgPqjHvPw-hPrGVbk";
+
+const rapidApiKey =
+  process.env.RAPIDAPI_KEY ?? "914e9be7b4mshe9ddc675e9957f6p104eb2jsnfba5c0969f5e";
+
+const rapidApiKeyPrimary =
+  process.env.RAPIDAPI_KEY_PRIMARY ?? "914e9be7b4mshe9ddc675e9957f6p104eb2jsnfba5c0969f5e";
+
+const rapidApiKeySecondary =
+  process.env.RAPIDAPI_KEY_SECONDARY ?? "914e9be7b4mshe9ddc675e9957f6p104eb2jsnfba5c0969f5e";
+
+const rapidApiProviderOrder =
+  process.env.RAPIDAPI_PROVIDER_ORDER ?? "youtube-mp36,youtube-mp3-2025";
 
 const config: ExpoConfig = {
   name: "Pulsebox",
@@ -32,14 +54,16 @@ const config: ExpoConfig = {
     eas: {
       projectId: "0b237302-23df-4439-94c1-2d43cdb1268b"
     },
-    supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    rapidApiKey: process.env.RAPIDAPI_KEY,
-    rapidApiKeyPrimary: process.env.RAPIDAPI_KEY_PRIMARY,
-    rapidApiKeySecondary: process.env.RAPIDAPI_KEY_SECONDARY,
-    rapidApiProviderOrder: process.env.RAPIDAPI_PROVIDER_ORDER,
-    rapidApiMonthlyLimitMp36: process.env.RAPIDAPI_MONTHLY_LIMIT_MP36,
-    rapidApiMonthlyLimitMp32025: process.env.RAPIDAPI_MONTHLY_LIMIT_MP32025
+    supabaseUrl,
+    supabaseAnonKey,
+    rapidApiKey,
+    rapidApiKeyPrimary,
+    rapidApiKeySecondary,
+    rapidApiProviderOrder,
+    rapidApiMonthlyLimitMp36:
+      process.env.RAPIDAPI_MONTHLY_LIMIT_MP36 ?? "280",
+    rapidApiMonthlyLimitMp32025:
+      process.env.RAPIDAPI_MONTHLY_LIMIT_MP32025 ?? "280"
   }
 };
 
