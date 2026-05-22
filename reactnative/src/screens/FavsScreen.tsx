@@ -9,7 +9,6 @@ import {
 import { useFocusEffect } from "@react-navigation/native";
 import { fetchLikedSongs } from "@/lib/api";
 import { SongRow } from "@/components/SongRow";
-import { usePlayerStore } from "@/store/player-store";
 import { colors } from "@/theme";
 import type { DbSong } from "@/types";
 import { useToastStore } from "@/store/toast-store";
@@ -17,13 +16,11 @@ import { useToastStore } from "@/store/toast-store";
 export function FavsScreen() {
   const [songs, setSongs] = useState<DbSong[]>([]);
   const [loading, setLoading] = useState(true);
-  const initPlaylist = usePlayerStore((state) => state.initPlaylist);
 
   const loadSongs = useCallback(async () => {
     const nextSongs = await fetchLikedSongs();
     setSongs(nextSongs);
-    initPlaylist(nextSongs);
-  }, [initPlaylist]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -57,15 +54,14 @@ export function FavsScreen() {
             <SongRow
               index={index}
               key={song.id}
+              songs={songs}
               onSongRemoved={(songId) => {
                 const nextSongs = songs.filter((item) => item.id !== songId);
                 setSongs(nextSongs);
-                initPlaylist(nextSongs);
               }}
               onSongUpdated={(updatedSong) => {
                 const nextSongs = songs.map((item) => (item.id === updatedSong.id ? updatedSong : item));
                 setSongs(nextSongs);
-                initPlaylist(nextSongs);
               }}
               song={song}
             />

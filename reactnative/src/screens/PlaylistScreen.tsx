@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -12,6 +12,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { addSongToPlaylist, deletePlaylist, fetchPlaylistBySlug, renamePlaylist } from "@/lib/api";
 import { SongRow } from "@/components/SongRow";
 import { SongSearchModal } from "@/components/SongSearchModal";
@@ -27,6 +28,7 @@ type Navigation = NativeStackNavigationProp<RootStackParamList>;
 export function PlaylistScreen() {
   const route = useRoute<Route>();
   const navigation = useNavigation<Navigation>();
+  const insets = useSafeAreaInsets();
   const [playlist, setPlaylist] = useState<DbPlaylist | null>(null);
   const [songs, setSongs] = useState<DbSong[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,7 +37,7 @@ export function PlaylistScreen() {
   const [nameInput, setNameInput] = useState("");
   const [renaming, setRenaming] = useState(false);
 
-  const initPlaylist = usePlayerStore((state) => state.initPlaylist);
+  const addSong = usePlayerStore((state) => state.addSong);
 
   const loadPage = useCallback(async () => {
     const data = await fetchPlaylistBySlug(route.params.slug);
@@ -53,10 +55,6 @@ export function PlaylistScreen() {
         .finally(() => setLoading(false));
     }, [loadPage])
   );
-
-  useEffect(() => {
-    initPlaylist(songs);
-  }, [songs, initPlaylist]);
 
   async function handleRename() {
     if (!playlist || !nameInput.trim()) return;
@@ -113,7 +111,7 @@ export function PlaylistScreen() {
 
   return (
     <>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingTop: Math.max(insets.top + 10, 24) }]}>
         <View style={styles.headerCard}>
           <View style={styles.headerRow}>
             <Pressable onPress={() => navigation.goBack()} style={styles.headerButton}>
@@ -170,6 +168,7 @@ export function PlaylistScreen() {
               <SongRow
                 index={index}
                 key={song.id}
+                songs={songs}
                 onSongRemoved={(songId) => {
                   const nextSongs = songs.filter((item) => item.id !== songId);
                   setSongs(nextSongs);
@@ -199,6 +198,7 @@ export function PlaylistScreen() {
             duration: item.durationSeconds
           });
           setSongs([...songs, song]);
+          addSong(song);
           useToastStore.getState().addToast(`Added "${item.title}"`, "success");
         }}
         title="Add Song"
@@ -218,7 +218,7 @@ const styles = StyleSheet.create({
   content: {
     paddingBottom: 190,
     paddingHorizontal: 14,
-    paddingTop: 18
+    paddingTop: 24
   },
   headerCard: {
     backgroundColor: "rgba(255,255,255,0.04)",
@@ -266,7 +266,7 @@ const styles = StyleSheet.create({
     textTransform: "uppercase"
   },
   titleRow: {
-    alignItems: "center",
+    alignItems: "flex-start",
     flexDirection: "row",
     justifyContent: "space-between",
     marginTop: 8
@@ -276,6 +276,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 26,
     fontWeight: "800",
+    lineHeight: 32,
     marginRight: 12
   },
   meta: {

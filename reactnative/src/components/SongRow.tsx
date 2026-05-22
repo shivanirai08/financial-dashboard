@@ -18,14 +18,15 @@ import { SongSearchModal } from "@/components/SongSearchModal";
 type Props = {
   song: DbSong;
   index: number;
+  songs: DbSong[];
   onSongUpdated: (song: DbSong) => void;
   onSongRemoved: (songId: string) => void;
 };
 
-export function SongRow({ song, index, onSongUpdated, onSongRemoved }: Props) {
+export function SongRow({ song, index, songs, onSongUpdated, onSongRemoved }: Props) {
   const currentSong = usePlayerStore((state) => state.currentSong);
   const isPlaying = usePlayerStore((state) => state.isPlaying);
-  const playAtIndex = usePlayerStore((state) => state.playAtIndex);
+  const startPlaylistAtIndex = usePlayerStore((state) => state.startPlaylistAtIndex);
   const openVideo = usePlayerStore((state) => state.openVideo);
   const updateLike = usePlayerStore((state) => state.updateLike);
   const updateSongVideoId = usePlayerStore((state) => state.updateSongVideoId);
@@ -50,7 +51,7 @@ export function SongRow({ song, index, onSongUpdated, onSongRemoved }: Props) {
 
   function handlePlay() {
     if (!hasVideo) return;
-    playAtIndex(index);
+    startPlaylistAtIndex(songs, index);
   }
 
   async function handleLike() {

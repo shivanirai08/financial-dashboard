@@ -21,6 +21,7 @@ type PlayerStore = {
   duration: number;
   video: VideoState;
   initPlaylist: (songs: DbSong[]) => void;
+  startPlaylistAtIndex: (songs: DbSong[], songIndex: number) => void;
   playAtIndex: (songIndex: number) => void;
   playNext: () => void;
   playPrev: () => void;
@@ -76,6 +77,25 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       currentSong: null,
       isPlaying: false,
       isLoadingTrack: false,
+      progress: 0,
+      duration: 0
+    });
+  },
+
+  startPlaylistAtIndex(songs, songIndex) {
+    const queue = makeDefaultQueue(songs.length);
+    let queuePos = queue.indexOf(songIndex);
+    if (queuePos < 0) {
+      queuePos = 0;
+    }
+
+    set({
+      songs,
+      queue,
+      currentQueuePos: queuePos,
+      currentSong: songs[songIndex] ?? null,
+      isPlaying: true,
+      isLoadingTrack: true,
       progress: 0,
       duration: 0
     });

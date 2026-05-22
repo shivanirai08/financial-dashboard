@@ -13,6 +13,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createPlaylist, fetchPlaylists, getPlaylistPreview, searchYoutube, syncSpotifyPublicPlaylist } from "@/lib/api";
 import { PlaylistCard } from "@/components/PlaylistCard";
 import { VideoModal } from "@/components/VideoModal";
@@ -26,6 +27,7 @@ type Navigation = NativeStackNavigationProp<RootStackParamList>;
 
 export function HomeScreen() {
   const navigation = useNavigation<Navigation>();
+  const insets = useSafeAreaInsets();
   const [playlists, setPlaylists] = useState<Array<{ id: string; name: string; slug: string; created_at: string }>>([]);
   const [likedCount, setLikedCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -42,8 +44,7 @@ export function HomeScreen() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const [videoTitle, setVideoTitle] = useState<string>("YouTube");
 
-  const initPlaylist = usePlayerStore((state) => state.initPlaylist);
-  const playAtIndex = usePlayerStore((state) => state.playAtIndex);
+  const startPlaylistAtIndex = usePlayerStore((state) => state.startPlaylistAtIndex);
 
   const loadData = useCallback(async () => {
     const data = await fetchPlaylists();
@@ -134,28 +135,30 @@ export function HomeScreen() {
   }
 
   function handleQuickPlay(item: YoutubeSearchItem) {
-    initPlaylist([
-      {
-        id: `search-${item.videoId}`,
-        playlist_id: "search",
-        title: item.title,
-        artist: item.artist,
-        youtube_video_id: item.videoId,
-        youtube_url: item.url,
-        thumbnail: item.thumbnailUrl ?? null,
-        duration: item.durationSeconds,
-        position: 0,
-        liked: false,
-        created_at: new Date().toISOString()
-      }
-    ]);
-    playAtIndex(0);
+    startPlaylistAtIndex(
+      [
+        {
+          id: `search-${item.videoId}`,
+          playlist_id: "search",
+          title: item.title,
+          artist: item.artist,
+          youtube_video_id: item.videoId,
+          youtube_url: item.url,
+          thumbnail: item.thumbnailUrl ?? null,
+          duration: item.durationSeconds,
+          position: 0,
+          liked: false,
+          created_at: new Date().toISOString()
+        }
+      ],
+      0
+    );
   }
 
   return (
     <>
       <ScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[styles.content, { paddingTop: Math.max(insets.top + 10, 24) }]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.cyan} />}
       >
         <LinearGradient colors={[colors.bg, colors.bgDeep]} style={styles.hero}>
@@ -306,11 +309,13 @@ const styles = StyleSheet.create({
     gap: 16,
     paddingBottom: 190,
     paddingHorizontal: 14,
-    paddingTop: 18
+    paddingTop: 24
   },
   hero: {
     borderRadius: 30,
-    padding: 22
+    overflow: "hidden",
+    paddingHorizontal: 22,
+    paddingVertical: 24
   },
   kicker: {
     color: colors.cyan,
@@ -323,6 +328,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 31,
     fontWeight: "800",
+    lineHeight: 38,
     marginTop: 10
   },
   heroBody: {
