@@ -1,9 +1,9 @@
-import "dotenv/config";
 import type { ExpoConfig } from "expo/config";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 
-loadEnv({ path: path.resolve(__dirname, "../.env") });
+// Load .env from reactnative/ directory so it works both locally and in EAS cloud builds.
+loadEnv({ path: path.resolve(__dirname, ".env") });
 
 const config: ExpoConfig = {
   name: "Pulsebox",
@@ -29,6 +29,9 @@ const config: ExpoConfig = {
   },
   plugins: ["expo-font"],
   extra: {
+    eas: {
+      projectId: "0b237302-23df-4439-94c1-2d43cdb1268b"
+    },
     supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
     supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     rapidApiKey: process.env.RAPIDAPI_KEY,
