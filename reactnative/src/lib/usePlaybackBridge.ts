@@ -64,7 +64,7 @@ export function usePlaybackBridge() {
     void nativeAudioController.syncPlaybackState(isPlaying).catch(() => {
       // Playback state sync is best-effort.
     });
-  }, [isPlaying, currentSong?.id]);
+  }, [isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps -- intentionally omits currentSong?.id: song changes are handled by playSong (shouldPlay:true), only user-driven pause/play should sync
 
   useEffect(() => {
     const nextSongIndex = queue[currentQueuePos + 1];

@@ -1,11 +1,4 @@
-import {
-  createAudioPlayer,
-  requestNotificationPermissionsAsync,
-  setAudioModeAsync,
-  type AudioPlayer,
-  type AudioStatus,
-} from "expo-audio";
-import { Platform } from "react-native";
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS, type AVPlaybackStatus } from "expo-av";
 import type { DbSong } from "@/types";
 import { appEnv } from "@/env";
 
@@ -22,42 +15,23 @@ type ProviderName = "youtube-mp36" | "youtube-mp3-2025";
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 
 class NativeAudioController {
-  private player: AudioPlayer | null = null;
+  private sound: Audio.Sound | null = null;
   private callbacks: PlayerCallbacks = {};
   private currentSongId: string | null = null;
   private currentVideoId: string | null = null;
-  private currentTrack: DbSong | null = null;
   private streamUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
   private nextVideoId: string | null = null;
-  private initialized = false;
-  private statusSubscription: { remove: () => void } | null = null;
 
   async init() {
-    if (this.initialized && this.player) return;
-
-    await setAudioModeAsync({
-      playsInSilentMode: true,
-      shouldPlayInBackground: true,
-      interruptionMode: "doNotMix",
-      shouldRouteThroughEarpiece: false,
+    await Audio.setAudioModeAsync({
+      staysActiveInBackground: true,
+      shouldDuckAndroid: true,
+      playsInSilentModeIOS: true,
+      allowsRecordingIOS: false,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      playThroughEarpieceAndroid: false
     });
-
-    if (Platform.OS === "android") {
-      try {
-        await requestNotificationPermissionsAsync();
-      } catch {
-        // Best effort only.
-      }
-    }
-
-    this.player = createAudioPlayer(null, {
-      updateInterval: 1000,
-    });
-    this.statusSubscription = this.player.addListener(
-      "playbackStatusUpdate",
-      this.handleStatusUpdate
-    );
-    this.initialized = true;
   }
 
   setCallbacks(callbacks: PlayerCallbacks) {
@@ -82,54 +56,49 @@ class NativeAudioController {
     const videoId = song.youtube_video_id;
     const streamUrl = await this.resolveStreamUrl(videoId);
 
-    if (!this.player) {
-      throw new Error("Audio player failed to initialize");
+    if (this.sound) {
+      await this.sound.unloadAsync();
+      this.sound = null;
     }
 
-    this.currentTrack = song;
+    const { sound } = await Audio.Sound.createAsync(
+      { uri: streamUrl },
+      {
+        shouldPlay: true,
+        progressUpdateIntervalMillis: 1000
+      },
+      this.handleStatusUpdate
+    );
+
+    this.sound = sound;
     this.currentSongId = song.id;
     this.currentVideoId = videoId;
-
-    this.player.replace({
-      uri: streamUrl,
-      headers: {
-        "User-Agent": "Pulsebox",
-      },
-      name: song.title,
-    });
-    this.activateLockScreen(song);
-    this.player.play();
   }
 
   async syncPlaybackState(shouldPlay: boolean) {
-    if (!this.player) return;
+    if (!this.sound) return;
     if (shouldPlay) {
-      this.player.play();
+      await this.sound.playAsync();
     } else {
-      this.player.pause();
+      await this.sound.pauseAsync();
     }
   }
 
   async seekTo(seconds: number) {
-    if (!this.player) return;
-    await this.player.seekTo(seconds);
+    if (!this.sound) return;
+    await this.sound.setPositionAsync(seconds * 1000);
   }
 
   async stop() {
-    if (!this.player) return;
-    this.player.pause();
-    this.player.clearLockScreenControls();
-    this.statusSubscription?.remove();
-    this.statusSubscription = null;
-    this.player.remove();
-    this.player = null;
+    if (!this.sound) return;
+    await this.sound.stopAsync();
+    await this.sound.unloadAsync();
+    this.sound = null;
     this.currentSongId = null;
     this.currentVideoId = null;
-    this.currentTrack = null;
-    this.initialized = false;
   }
 
-  private handleStatusUpdate = (status: AudioStatus) => {
+  private handleStatusUpdate = (status: AVPlaybackStatus) => {
     if (!status.isLoaded) {
       if (status.error) {
         this.callbacks.onError?.(new Error(status.error));
@@ -137,41 +106,17 @@ class NativeAudioController {
       return;
     }
 
-    this.callbacks.onPlayStateChange?.(status.playing);
-    this.callbacks.onTimeUpdate?.(status.currentTime, status.duration ?? 0);
-    if (status.duration) {
-      this.callbacks.onDuration?.(status.duration);
-    }
-
-    if (this.currentTrack && this.player) {
-      this.player.updateLockScreenMetadata({
-        title: this.currentTrack.title,
-        artist: this.currentTrack.artist ?? "Pulsebox",
-        artworkUrl: this.currentTrack.thumbnail ?? undefined,
-      });
-    }
-
     if (status.didJustFinish) {
       this.callbacks.onEnded?.();
+      return;
+    }
+
+    this.callbacks.onPlayStateChange?.(status.isPlaying);
+    this.callbacks.onTimeUpdate?.(status.positionMillis / 1000, status.durationMillis ? status.durationMillis / 1000 : 0);
+    if (status.durationMillis) {
+      this.callbacks.onDuration?.(status.durationMillis / 1000);
     }
   };
-
-  private activateLockScreen(song: DbSong) {
-    if (!this.player) return;
-
-    this.player.setActiveForLockScreen(
-      true,
-      {
-        title: song.title,
-        artist: song.artist ?? "Pulsebox",
-        artworkUrl: song.thumbnail ?? undefined,
-      },
-      {
-        showSeekBackward: true,
-        showSeekForward: true,
-      }
-    );
-  }
 
   private async resolveStreamUrl(videoId: string) {
     const cached = this.streamUrlCache.get(videoId);

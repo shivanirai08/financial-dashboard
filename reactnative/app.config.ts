@@ -49,15 +49,7 @@ const config: ExpoConfig = {
       backgroundColor: "#07111f"
     }
   },
-  plugins: [
-    "expo-font",
-    [
-      "expo-audio",
-      {
-        enableBackgroundPlayback: true
-      }
-    ]
-  ],
+  plugins: ["expo-font"],
   extra: {
     eas: {
       projectId: "0b237302-23df-4439-94c1-2d43cdb1268b"
