@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { nativeAudioController } from "@/lib/playback";
 import { usePlayerStore } from "@/store/player-store";
 import { useToastStore } from "@/store/toast-store";
+import { State } from "react-native-track-player";
 
 export function usePlaybackBridge() {
   const currentSong = usePlayerStore((state) => state.currentSong);
@@ -18,10 +19,12 @@ export function usePlaybackBridge() {
   useEffect(() => {
     void nativeAudioController.init();
     nativeAudioController.setCallbacks({
-      onPlayStateChange: (playing) => {
-        setIsPlaying(playing);
-        if (playing) {
+      onPlayStateChange: (playing, state) => {
+        if (playing || state === State.Buffering || state === State.Loading) {
           setIsLoadingTrack(false);
+        }
+        if (state === State.Paused || state === State.Stopped || state === State.Ended) {
+          setIsPlaying(false);
         }
       },
       onTimeUpdate: (progress, duration) => {
@@ -34,6 +37,18 @@ export function usePlaybackBridge() {
         setProgressState(0, 0);
         playNext();
       },
+      onRemotePlay: () => {
+        setIsPlaying(true);
+      },
+      onRemotePause: () => {
+        setIsPlaying(false);
+      },
+      onRemoteNext: () => {
+        playNext();
+      },
+      onRemotePrev: () => {
+        playPrev();
+      },
       onError: (error) => {
         setIsLoadingTrack(false);
         useToastStore.getState().addToast(error.message || "Playback failed", "error");
@@ -43,7 +58,7 @@ export function usePlaybackBridge() {
     return () => {
       void nativeAudioController.stop();
     };
-  }, [playNext, setIsLoadingTrack, setIsPlaying, setProgressState]);
+  }, [playNext, playPrev, setIsLoadingTrack, setIsPlaying, setProgressState]);
 
   useEffect(() => {
     if (!currentSong?.youtube_video_id) {
@@ -79,8 +94,4 @@ export function usePlaybackBridge() {
     }
   }, [currentSong, setIsPlaying]);
 
-  useEffect(() => {
-    // Keep these methods referenced for future remote-control expansion.
-    void playPrev;
-  }, [playPrev]);
 }

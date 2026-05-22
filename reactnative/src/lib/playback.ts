@@ -1,13 +1,24 @@
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS, type AVPlaybackStatus } from "expo-av";
+import { type EmitterSubscription } from "react-native";
+import TrackPlayer, {
+  AppKilledPlaybackBehavior,
+  Capability,
+  Event,
+  State,
+  type PlaybackState,
+} from "react-native-track-player";
 import type { DbSong } from "@/types";
 import { appEnv } from "@/env";
 
 type PlayerCallbacks = {
-  onPlayStateChange?: (playing: boolean) => void;
+  onPlayStateChange?: (playing: boolean, state: PlaybackState["state"]) => void;
   onTimeUpdate?: (currentTime: number, duration: number) => void;
   onDuration?: (duration: number) => void;
   onEnded?: () => void;
   onError?: (error: Error) => void;
+  onRemotePlay?: () => void;
+  onRemotePause?: () => void;
+  onRemoteNext?: () => void;
+  onRemotePrev?: () => void;
 };
 
 type ProviderName = "youtube-mp36" | "youtube-mp3-2025";
@@ -15,23 +26,77 @@ type ProviderName = "youtube-mp36" | "youtube-mp3-2025";
 const STREAM_URL_CACHE_TTL_MS = 60 * 60 * 1000;
 
 class NativeAudioController {
-  private sound: Audio.Sound | null = null;
   private callbacks: PlayerCallbacks = {};
   private currentSongId: string | null = null;
   private currentVideoId: string | null = null;
   private streamUrlCache = new Map<string, { streamUrl: string; expiresAt: number }>();
   private nextVideoId: string | null = null;
+  private isInitialized = false;
+  private listeners: EmitterSubscription[] = [];
 
   async init() {
-    await Audio.setAudioModeAsync({
-      staysActiveInBackground: true,
-      shouldDuckAndroid: true,
-      playsInSilentModeIOS: true,
-      allowsRecordingIOS: false,
-      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-      playThroughEarpieceAndroid: false
+    if (this.isInitialized) {
+      return;
+    }
+
+    await TrackPlayer.setupPlayer();
+    await TrackPlayer.updateOptions({
+      android: {
+        appKilledPlaybackBehavior: AppKilledPlaybackBehavior.ContinuePlayback,
+      },
+      capabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.Stop,
+        Capability.SeekTo,
+        Capability.SkipToNext,
+        Capability.SkipToPrevious,
+      ],
+      compactCapabilities: [Capability.Play, Capability.Pause, Capability.SkipToNext],
+      notificationCapabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.Stop,
+        Capability.SeekTo,
+        Capability.SkipToNext,
+        Capability.SkipToPrevious,
+      ],
+      progressUpdateEventInterval: 1,
     });
+
+    this.listeners = [
+      TrackPlayer.addEventListener(Event.PlaybackState, (payload) => {
+        const playing = payload.state === State.Playing;
+        this.callbacks.onPlayStateChange?.(playing, payload.state);
+      }),
+      TrackPlayer.addEventListener(Event.PlaybackProgressUpdated, (payload) => {
+        this.callbacks.onTimeUpdate?.(payload.position, payload.duration);
+        this.callbacks.onDuration?.(payload.duration);
+      }),
+      TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => {
+        this.callbacks.onEnded?.();
+      }),
+      TrackPlayer.addEventListener(Event.PlaybackError, (payload) => {
+        this.callbacks.onError?.(new Error(payload.message));
+      }),
+      TrackPlayer.addEventListener(Event.RemotePlay, () => {
+        this.callbacks.onRemotePlay?.();
+      }),
+      TrackPlayer.addEventListener(Event.RemotePause, () => {
+        this.callbacks.onRemotePause?.();
+      }),
+      TrackPlayer.addEventListener(Event.RemoteNext, () => {
+        this.callbacks.onRemoteNext?.();
+      }),
+      TrackPlayer.addEventListener(Event.RemotePrevious, () => {
+        this.callbacks.onRemotePrev?.();
+      }),
+      TrackPlayer.addEventListener(Event.RemoteSeek, (payload) => {
+        void this.seekTo(payload.position);
+      }),
+    ];
+
+    this.isInitialized = true;
   }
 
   setCallbacks(callbacks: PlayerCallbacks) {
@@ -56,67 +121,39 @@ class NativeAudioController {
     const videoId = song.youtube_video_id;
     const streamUrl = await this.resolveStreamUrl(videoId);
 
-    if (this.sound) {
-      await this.sound.unloadAsync();
-      this.sound = null;
-    }
+    await TrackPlayer.reset();
+    await TrackPlayer.add({
+      id: song.id,
+      url: streamUrl,
+      title: song.title,
+      artist: song.artist,
+      artwork: song.thumbnail ?? undefined,
+      duration: song.duration ?? undefined,
+    });
+    await TrackPlayer.play();
 
-    const { sound } = await Audio.Sound.createAsync(
-      { uri: streamUrl },
-      {
-        shouldPlay: true,
-        progressUpdateIntervalMillis: 1000
-      },
-      this.handleStatusUpdate
-    );
-
-    this.sound = sound;
     this.currentSongId = song.id;
     this.currentVideoId = videoId;
   }
 
   async syncPlaybackState(shouldPlay: boolean) {
-    if (!this.sound) return;
     if (shouldPlay) {
-      await this.sound.playAsync();
+      await TrackPlayer.play();
     } else {
-      await this.sound.pauseAsync();
+      await TrackPlayer.pause();
     }
   }
 
   async seekTo(seconds: number) {
-    if (!this.sound) return;
-    await this.sound.setPositionAsync(seconds * 1000);
+    await TrackPlayer.seekTo(seconds);
   }
 
   async stop() {
-    if (!this.sound) return;
-    await this.sound.stopAsync();
-    await this.sound.unloadAsync();
-    this.sound = null;
+    await TrackPlayer.stop();
+    await TrackPlayer.reset();
     this.currentSongId = null;
     this.currentVideoId = null;
   }
-
-  private handleStatusUpdate = (status: AVPlaybackStatus) => {
-    if (!status.isLoaded) {
-      if (status.error) {
-        this.callbacks.onError?.(new Error(status.error));
-      }
-      return;
-    }
-
-    if (status.didJustFinish) {
-      this.callbacks.onEnded?.();
-      return;
-    }
-
-    this.callbacks.onPlayStateChange?.(status.isPlaying);
-    this.callbacks.onTimeUpdate?.(status.positionMillis / 1000, status.durationMillis ? status.durationMillis / 1000 : 0);
-    if (status.durationMillis) {
-      this.callbacks.onDuration?.(status.durationMillis / 1000);
-    }
-  };
 
   private async resolveStreamUrl(videoId: string) {
     const cached = this.streamUrlCache.get(videoId);
