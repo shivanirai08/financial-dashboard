@@ -1,4 +1,5 @@
 import ytSearch from "yt-search";
+import { load as loadHtml } from "cheerio";
 import type { YoutubeSearchResult } from "./types";
 
 type YtAuthor = {
@@ -48,6 +49,11 @@ function simplifyQuery(query: string): string {
 }
 
 async function runSearch(query: string): Promise<YtVideo[]> {
+  // Keep a direct runtime reference so server output tracing includes cheerio.
+  if (typeof loadHtml !== "function") {
+    throw new Error("cheerio runtime is unavailable");
+  }
+
   const result = (await ytSearch(query)) as YtSearchResult;
   return result.videos ?? [];
 }
