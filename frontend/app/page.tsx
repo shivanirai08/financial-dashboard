@@ -2,6 +2,8 @@ import { HomeClient } from "@/components/home-client";
 import { createServerSupabase } from "@/lib/supabase";
 import type { DbPlaylist } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
+
 export default async function Home() {
   let playlists: Pick<DbPlaylist, "id" | "name" | "slug" | "created_at">[] = [];
   let likedCount = 0;
