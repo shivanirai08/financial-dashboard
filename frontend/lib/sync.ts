@@ -41,45 +41,52 @@ export async function syncSpotifyPublicPlaylist(playlistInput: string) {
   // Remove old songs so re-sync doesn't create duplicates
   await supabase.from("songs").delete().eq("playlist_id", savedPlaylist.id);
 
-  // Search YouTube for each track; failures are per-song so one bad search doesn't abort all
+  // Parallelize YouTube searches with concurrency limit to avoid rate limiting
+  const MAX_CONCURRENT = 5; // Search 5 videos at once
   const songsToInsert = [];
-  for (let i = 0; i < trackStrings.length; i++) {
-    const parts = trackStrings[i].split(" - ").map((s) => s.trim());
-    const title = parts[0] || "Unknown";
-    const artist = parts[1] || "Unknown";
 
-    let videoId: string | null = null;
-    let videoUrl: string | null = null;
-    let thumbnail: string | null = null;
-    let duration: number | null = null;
+  for (let i = 0; i < trackStrings.length; i += MAX_CONCURRENT) {
+    const batch = trackStrings.slice(i, i + MAX_CONCURRENT);
+    const results = await Promise.all(
+      batch.map(async (trackString, batchIndex) => {
+        const globalIndex = i + batchIndex;
+        const parts = trackString.split(" - ").map((s) => s.trim());
+        const title = parts[0] || "Unknown";
+        const artist = parts[1] || "Unknown";
 
-    try {
-      const results = await searchYoutubeVideos(`${title} ${artist} song`, 1);
-      const first = results[0];
-      if (first) {
-        videoId = first.videoId;
-        videoUrl = first.url;
-        thumbnail = `https://img.youtube.com/vi/${first.videoId}/mqdefault.jpg`;
-        duration = first.durationSeconds;
-      }
-    } catch (err) {
-      console.warn(`[syncSpotifyPublicPlaylist] YouTube search failed for "${title}": ${err}`);
-    }
+        let videoId: string | null = null;
+        let videoUrl: string | null = null;
+        let thumbnail: string | null = null;
+        let duration: number | null = null;
 
-    // Small delay to avoid YouTube rate limiting (302 redirects) during batch sync
-    await new Promise((r) => setTimeout(r, 300));
+        try {
+          const searchResults = await searchYoutubeVideos(`${title} ${artist} song`, 1);
+          const first = searchResults[0];
+          if (first) {
+            videoId = first.videoId;
+            videoUrl = first.url;
+            thumbnail = `https://img.youtube.com/vi/${first.videoId}/mqdefault.jpg`;
+            duration = first.durationSeconds;
+          }
+        } catch (err) {
+          console.warn(`[syncSpotifyPublicPlaylist] YouTube search failed for "${title}": ${err}`);
+        }
 
-    songsToInsert.push({
-      playlist_id: savedPlaylist.id,
-      title,
-      artist,
-      youtube_video_id: videoId,
-      youtube_url: videoUrl,
-      thumbnail,
-      duration,
-      position: i,
-      liked: false,
-    });
+        return {
+          playlist_id: savedPlaylist.id,
+          title,
+          artist,
+          youtube_video_id: videoId,
+          youtube_url: videoUrl,
+          thumbnail,
+          duration,
+          position: globalIndex,
+          liked: false,
+        };
+      })
+    );
+
+    songsToInsert.push(...results);
   }
 
   const { error: songsError } = await supabase.from("songs").insert(songsToInsert);

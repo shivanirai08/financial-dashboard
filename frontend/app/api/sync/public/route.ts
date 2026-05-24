@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { syncSpotifyPublicPlaylist } from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 540; // 9 minutes for processing large playlists
+export const maxDuration = 300; // 5 minutes (hobby plan max)
 
 export async function POST(request: NextRequest) {
   const form = await request.formData();

@@ -5,7 +5,7 @@ import {
   getPlaylistTracks,
 } from "@/lib/spotify";
 
-export const maxDuration = 540; // 9 minutes for processing large playlists
+export const maxDuration = 300; // 5 minutes (hobby plan max)
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
